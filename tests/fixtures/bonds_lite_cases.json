@@ -1,0 +1,44 @@
+{
+  "stress_blocks": [
+    {"source": "C9:J15", "destination": "C9:J15", "rows": 7, "columns": 8, "first_cell": "C9", "last_cell": "J15", "first_value": 1.101, "last_value": 0.102},
+    {"source": "M9:DI15", "destination": "M9:DI15", "rows": 7, "columns": 101, "first_cell": "M9", "last_cell": "DI15", "first_value": 0.001103, "last_value": -0.001104},
+    {"source": "DL9:HH15", "destination": "DL9:HH15", "rows": 7, "columns": 101, "first_cell": "DL9", "last_cell": "HH15", "first_value": 0.001105, "last_value": 0.001106},
+    {"source": "C20:J26", "destination": "C20:J26", "rows": 7, "columns": 8, "first_cell": "C20", "last_cell": "J26", "first_value": 1.201, "last_value": 0.202},
+    {"source": "M20:DI26", "destination": "M20:DI26", "rows": 7, "columns": 101, "first_cell": "M20", "last_cell": "DI26", "first_value": 0.002103, "last_value": -0.002104},
+    {"source": "DL20:HH26", "destination": "DL20:HH26", "rows": 7, "columns": 101, "first_cell": "DL20", "last_cell": "HH26", "first_value": 0.002105, "last_value": 0.002106},
+    {"source": "C31:J37", "destination": "C31:J37", "rows": 7, "columns": 8, "first_cell": "C31", "last_cell": "J37", "first_value": 1.301, "last_value": 0.302},
+    {"source": "M31:DI37", "destination": "M31:DI37", "rows": 7, "columns": 101, "first_cell": "M31", "last_cell": "DI37", "first_value": 0.003103, "last_value": -0.003104},
+    {"source": "DL31:HH37", "destination": "DL31:HH37", "rows": 7, "columns": 101, "first_cell": "DL31", "last_cell": "HH37", "first_value": 0.003105, "last_value": 0.003106},
+    {"source": "C42:J48", "destination": "C42:J48", "rows": 7, "columns": 8, "first_cell": "C42", "last_cell": "J48", "first_value": 1.401, "last_value": 0.402},
+    {"source": "M42:DI48", "destination": "M42:DI48", "rows": 7, "columns": 101, "first_cell": "M42", "last_cell": "DI48", "first_value": 0.004103, "last_value": -0.004104},
+    {"source": "DL42:HH48", "destination": "DL42:HH48", "rows": 7, "columns": 101, "first_cell": "DL42", "last_cell": "HH48", "first_value": 0.004105, "last_value": 0.004106}
+  ],
+  "schema": {
+    "destination": ["Asset ID", "Nominal", "Currency"],
+    "valid": ["Asset ID", "Nominal", "Currency"],
+    "invalid": [
+      {"name": "missing", "headers": ["Asset ID", "Nominal"]},
+      {"name": "extra", "headers": ["Asset ID", "Nominal", "Currency", "Extra"]},
+      {"name": "reordered", "headers": ["Currency", "Nominal", "Asset ID"]},
+      {"name": "renamed", "headers": ["Identifier", "Nominal", "Currency"]},
+      {"name": "case_changed", "headers": ["asset id", "Nominal", "Currency"]},
+      {"name": "whitespace_changed", "headers": ["Asset ID ", "Nominal", "Currency"]},
+      {"name": "empty", "headers": []}
+    ]
+  },
+  "identifiers": {
+    "valid": ["BOND-001", 0, "BOND-001"],
+    "invalid": [
+      {"name": "empty", "values": []},
+      {"name": "null", "values": ["BOND-001", null]},
+      {"name": "empty_string", "values": ["BOND-001", ""]},
+      {"name": "whitespace", "values": ["BOND-001", " \t "]}
+    ]
+  },
+  "output": {
+    "timestamp": "2026-10-27T14:05:06",
+    "base": "Bonds Lite input_20261027_140506.xlsx",
+    "first_collision": "Bonds Lite input_20261027_140506_001.xlsx",
+    "second_collision": "Bonds Lite input_20261027_140506_002.xlsx"
+  }
+}

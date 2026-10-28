@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bonds-lite-input"
+version = "0.1.0"
+description = "Generate validated Bonds Lite inputs through desktop Excel"
+requires-python = ">=3.13,<3.14"
+dependencies = ["xlwings>=0.32.1", "openpyxl>=3.1"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "openpyxl>=3.1", "black>=24", "isort>=5"]
+
+[tool.setuptools]
+py-modules = ["bonds_lite_input"]
+package-dir = {"" = "src"}
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+markers = [
+    "excel: explicitly enabled tests requiring Windows desktop Excel",
+    "network: explicitly opted-in real-network dependency tests",
+    "performance: explicitly enabled runtime measurements",
+]
+
+[tool.black]
+line-length = 88
+
+[tool.isort]
+profile = "black"

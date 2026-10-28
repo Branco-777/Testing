@@ -1,0 +1,2 @@
+input_file,status,seconds,output_folder_path,output_suffix,error
+Bonds Lite input_Bonds.xlsx,failed,3.607602100004442,C:\Users\Joao Branco\OneDrive - Just Group\Financial Resilience Team - General\07 Workstream 2\Testing\Bonds Lite output\20261028_170055\JRL Bonds,BWS_CoeffRefresh,[Errno 13] Permission denied: 'C:\\Users\\Joao Branco\\OneDrive - Just Group\\Financial Resilience Team - General\\07 Workstream 2\\Testing\\Bonds Lite output\\20261028_170055\\Bonds Lite input_Bonds.xlsx'
