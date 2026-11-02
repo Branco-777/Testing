@@ -7,11 +7,13 @@ import csv
 import ctypes
 import getpass
 import hashlib
+import json
 import logging
 import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -23,7 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from numbers import Real
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING, Callable, Iterator
 from xml.etree import ElementTree as ET
 from zipfile import ZipFile
 
@@ -44,6 +46,9 @@ class _ProgressState:
 
 _progress_state: ContextVar[_ProgressState | None] = ContextVar(
     "bonds_lite_progress", default=None
+)
+_local_caller_path: ContextVar[Path | None] = ContextVar(
+    "bonds_lite_local_caller_path", default=None
 )
 
 
@@ -67,6 +72,7 @@ class ModelConfig:
     python_executable: Path
     model_dir: Path
     timeout_seconds: float = 3600.0
+    packaged: bool = False
 
 
 @dataclass(frozen=True)
@@ -79,6 +85,33 @@ class ModelInput:
     output_suffix: str
     required_files: tuple[str, ...]
     input_hash: str
+
+
+def _validate_packaged_bundle(bundle: Path, release_id: str | None = None) -> dict[str, object]:
+    """Validate the release manifest and executable hashes for one bundle."""
+    manifest_path = bundle / "release.json"
+    controller = bundle / "Controller" / "BondsLiteController.exe"
+    model = bundle / "Model" / "BondsLiteModel.exe"
+    if not all(path.is_file() for path in (manifest_path, controller, model)):
+        raise BondsLiteError(f"Packaged Bonds Lite release is incomplete: {bundle}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise BondsLiteError(f"Cannot read packaged release manifest: {error}") from error
+    if not isinstance(manifest, dict):
+        raise BondsLiteError("Packaged release manifest must be a JSON object")
+    if release_id is not None and manifest.get("release_id") != release_id:
+        raise BondsLiteError("Packaged release manifest ID does not match the selected release")
+    for path, key in (
+        (controller, "controller_sha256"),
+        (model, "model_executable_sha256"),
+    ):
+        expected_hash = manifest.get(key)
+        if not isinstance(expected_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+            raise BondsLiteError(f"Packaged release manifest has an invalid {key}")
+        if _file_hash(path) != expected_hash:
+            raise BondsLiteError(f"Packaged release hash mismatch: {path.name}")
+    return manifest
 
 
 def _user_environment_value(name: str) -> str:
@@ -97,6 +130,12 @@ def _user_environment_value(name: str) -> str:
 
 def load_model_config(caller_path: Path) -> ModelConfig:
     """Resolve per-user model settings without borrowing the controller Python."""
+    if getattr(sys, "frozen", False):
+        controller = Path(sys.executable).resolve()
+        model = controller.parent.parent / "Model" / "BondsLiteModel.exe"
+        if not model.is_file():
+            raise BondsLiteError(f"Packaged model missing from the local cache: {model}")
+        return ModelConfig(model, model.parent, packaged=True)
     setting = os.environ.get("BONDS_LITE_MODEL_PYTHON", "").strip()
     if not setting:
         setting = _user_environment_value("BONDS_LITE_MODEL_PYTHON")
@@ -122,6 +161,11 @@ def load_model_config(caller_path: Path) -> ModelConfig:
 
 def preflight_model_environment(config: ModelConfig) -> None:
     """Probe numerical imports in the separate environment without running a model."""
+    if config.packaged:
+        runtime = config.model_dir / "_internal" / "python311.dll"
+        if not config.python_executable.is_file() or not runtime.is_file():
+            raise BondsLiteError("Packaged model/runtime is incomplete; contact the release maintainer")
+        return
     probe = (
         "import sys,numpy,pandas,xlwings,scipy,dateutil; "
         "assert sys.version_info[:2] == (3,11), 'Model Python 3.11 is required'; "
@@ -359,6 +403,22 @@ def _remove_model_artifact(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def _retry_readonly_backup_removal(
+    function: Callable[[str], None], path: str, error: BaseException,
+) -> None:
+    """Retry a failed backup deletion only when its path is read-only."""
+    if not isinstance(error, PermissionError) or function not in (
+        os.unlink, os.remove, os.rmdir,
+    ):
+        raise error
+    target = Path(path)
+    mode = target.stat().st_mode
+    if mode & stat.S_IWRITE:
+        raise error
+    target.chmod(mode | stat.S_IWRITE)
+    function(path)
+
+
 @contextmanager
 def model_results_transaction(run_folder: Path, inputs: dict[str, ModelInput]) -> Iterator[_ModelResultsCommit]:
     """Stage old results outside the batch folder and restore unless safely committed."""
@@ -403,13 +463,29 @@ def model_results_transaction(run_folder: Path, inputs: dict[str, ModelInput]) -
                 logger.error(message)
                 raise BondsLiteError(message) from error
         try:
-            shutil.rmtree(backup)
-        except OSError:
-            logger.warning("Results settled, but rollback backup could not be removed: %s", backup, exc_info=True)
+            shutil.rmtree(backup, onexc=_retry_readonly_backup_removal)
+        except OSError as error:
+            logger.warning(
+                "Results settled, but rollback backup could not be removed: %s (%s)",
+                backup, error,
+            )
 
 
 def _model_environment(config: ModelConfig) -> dict[str, str]:
     environment = os.environ.copy()
+    if config.packaged:
+        for key in tuple(environment):
+            if key.startswith("CONDA_") or key in {
+                "BONDS_LITE_MODEL_DIR", "BONDS_LITE_MODEL_PYTHON",
+                "PYTHONHOME", "PYTHONPATH", "PYTHONUSERBASE",
+            }:
+                environment.pop(key, None)
+        system_root = Path(environment.get("SystemRoot", r"C:\Windows"))
+        environment["PATH"] = os.pathsep.join(
+            (str(system_root / "System32"), str(system_root))
+        )
+        environment["PYTHONUNBUFFERED"] = "1"
+        return environment
     root = config.python_executable.parent
     environment.pop("PYTHONHOME", None)
     environment.pop("PYTHONPATH", None)
@@ -417,6 +493,16 @@ def _model_environment(config: ModelConfig) -> dict[str, str]:
     environment["PATH"] = os.pathsep.join((str(root), str(root / "Library" / "bin"), str(root / "Scripts"), environment.get("PATH", "")))
     environment["PYTHONUNBUFFERED"] = "1"
     return environment
+
+
+def _model_batch_command(config: ModelConfig, batch_folder: Path) -> list[str]:
+    """Build the source-mode or cached frozen-model command for one folder."""
+    if config.packaged:
+        return [str(config.python_executable), str(batch_folder)]
+    return [
+        str(config.python_executable), "-u",
+        str(config.model_dir / "run_bonds_batch.py"), str(batch_folder),
+    ]
 
 
 def _attach_model_job(child: subprocess.Popen) -> object | None:
@@ -529,10 +615,7 @@ def run_model_batch(
     started = time.monotonic()
     with _stage_batch_inputs_locally(run_folder, excel_application) as batch_folder:
         child = subprocess.Popen(
-            [
-                str(config.python_executable), "-u",
-                str(config.model_dir / "run_bonds_batch.py"), str(batch_folder),
-            ],
+            _model_batch_command(config, batch_folder),
             cwd=str(config.model_dir), shell=False, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1,
             env=_model_environment(config),
@@ -763,6 +846,265 @@ End Sub
 '''
 
 
+PACKAGED_VBA_LAUNCHER = r'''Option Explicit
+
+Private Const PACKAGED_RELEASE_ROOT As String = "\\server090\internal model$\29 Financial Resilience\Sandbox\SST spreadsheet executable file"
+Private mCurrentLocalBundle As String
+
+#If VBA7 Then
+Private Declare PtrSafe Function UrlUnescapeW Lib "shlwapi.dll" ( _
+    ByVal source As LongPtr, ByVal destination As LongPtr, _
+    ByRef length As Long, ByVal flags As Long) As Long
+#Else
+Private Declare Function UrlUnescapeW Lib "shlwapi.dll" ( _
+    ByVal source As Long, ByVal destination As Long, _
+    ByRef length As Long, ByVal flags As Long) As Long
+#End If
+
+Private Function QuoteArgument(ByVal value As String) As String
+    If InStr(value, Chr$(34)) > 0 Then
+        Err.Raise vbObjectError + 401, , "A file path contains a quote character"
+    End If
+    QuoteArgument = Chr$(34) & value & Chr$(34)
+End Function
+
+Private Function DecodeUrl(ByVal value As String) As String
+    Dim buffer As String, length As Long
+    length = Len(value) + 1
+    buffer = String$(length, vbNullChar)
+    If UrlUnescapeW(StrPtr(value), StrPtr(buffer), length, &H40000) <> 0 Then
+        Err.Raise vbObjectError + 410, , "Cannot decode workbook URL"
+    End If
+    DecodeUrl = Left$(buffer, length)
+End Function
+
+Public Function LocalDraftFullName() As String
+    Dim fullName As String, registry As Object, children As Variant, child As Variant
+    Dim prefix As Variant, mount As Variant, suffix As String, candidate As String
+    Dim root As String, key As String, filesystem As Object, splitAt As Long
+    Set filesystem = CreateObject("Scripting.FileSystemObject")
+    fullName = ThisWorkbook.FullName
+    If LCase$(Left$(fullName, 8)) <> "https://" Then
+        If Not filesystem.FileExists(fullName) Then
+            Err.Raise vbObjectError + 411, , "Save Draft in its locally synced OneDrive folder"
+        End If
+        LocalDraftFullName = fullName
+        Exit Function
+    End If
+    fullName = DecodeUrl(fullName)
+    Set registry = GetObject("winmgmts:{impersonationLevel=impersonate}!\\.\root\default:StdRegProv")
+    root = "Software\SyncEngines\Providers\OneDrive"
+    registry.EnumKey &H80000001, root, children
+    If IsArray(children) Then
+        For Each child In children
+            key = root & "\" & CStr(child)
+            prefix = Empty: mount = Empty
+            registry.GetStringValue &H80000001, key, "UrlNamespace", prefix
+            registry.GetStringValue &H80000001, key, "MountPoint", mount
+            If Not IsNull(prefix) And Not IsNull(mount) Then
+                If Len(CStr(prefix)) > 0 And Len(CStr(mount)) > 0 Then
+                    prefix = DecodeUrl(CStr(prefix))
+                    If Right$(prefix, 1) <> "/" Then prefix = prefix & "/"
+                    If LCase$(Left$(fullName, Len(prefix))) = LCase$(prefix) Then
+                        suffix = Replace(Mid$(fullName, Len(prefix) + 1), "/", "\")
+                        candidate = filesystem.BuildPath(CStr(mount), suffix)
+                        If filesystem.FileExists(candidate) Then
+                            LocalDraftFullName = candidate
+                            Exit Function
+                        End If
+                        splitAt = InStr(suffix, "\")
+                        If splitAt > 0 Then
+                            If LCase$(Right$(CStr(mount), Len(Left$(suffix, splitAt - 1)) + 3)) = _
+                                    LCase$(" - " & Left$(suffix, splitAt - 1)) Then
+                                candidate = filesystem.BuildPath(CStr(mount), Mid$(suffix, splitAt + 1))
+                                If filesystem.FileExists(candidate) Then
+                                    LocalDraftFullName = candidate
+                                    Exit Function
+                                End If
+                            End If
+                        End If
+                    End If
+                End If
+            End If
+        Next child
+    End If
+    Err.Raise vbObjectError + 412, , _
+        "Open Draft from its locally synced OneDrive folder, not Excel in a browser"
+End Function
+
+Private Function CompleteBundle(ByVal folder As String, ByVal filesystem As Object) As Boolean
+    CompleteBundle = filesystem.FileExists(filesystem.BuildPath(folder, "release.json")) _
+        And filesystem.FileExists(filesystem.BuildPath(folder, "Controller\BondsLiteController.exe")) _
+        And filesystem.FileExists(filesystem.BuildPath(folder, "Model\BondsLiteModel.exe"))
+End Function
+
+Private Function CurrentLocalBundle() As String
+    If Len(mCurrentLocalBundle) = 0 Then
+        mCurrentLocalBundle = ResolveLocalBundle()
+    End If
+    CurrentLocalBundle = mCurrentLocalBundle
+End Function
+
+Private Function ResolveLocalBundle() As String
+    On Error GoTo CopyFailed
+    Dim filesystem As Object, shell As Object, stream As Object, pattern As Object
+    Dim pointerPath As String, localPointer As String, pointerTemporary As String
+    Dim releaseId As String, localReleaseId As String, sourceBundle As String
+    Dim localRoot As String, cacheRoot As String, cacheRelease As String
+    Dim cacheBundle As String, localCacheBundle As String
+    Dim stagingRelease As String, stagingBundle As String
+    Dim errorNumber As Long, errorMessage As String
+    Set filesystem = CreateObject("Scripting.FileSystemObject")
+    Set shell = CreateObject("WScript.Shell")
+    Set pattern = CreateObject("VBScript.RegExp")
+    pattern.Pattern = "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$"
+    localRoot = filesystem.BuildPath(shell.ExpandEnvironmentStrings("%LOCALAPPDATA%"), "BondsLite")
+    cacheRoot = filesystem.BuildPath(localRoot, "releases")
+    If Not filesystem.FolderExists(localRoot) Then filesystem.CreateFolder localRoot
+    If Not filesystem.FolderExists(cacheRoot) Then filesystem.CreateFolder cacheRoot
+    localPointer = filesystem.BuildPath(localRoot, "current.txt")
+    If filesystem.FileExists(localPointer) Then
+        On Error Resume Next
+        Set stream = filesystem.OpenTextFile(localPointer, 1, False, 0)
+        localReleaseId = Trim$(stream.ReadAll)
+        stream.Close
+        Err.Clear
+        On Error GoTo CopyFailed
+        If pattern.Test(localReleaseId) Then
+            cacheRelease = filesystem.BuildPath(cacheRoot, localReleaseId)
+            localCacheBundle = filesystem.BuildPath(cacheRelease, "Bonds Lite App")
+            If Not CompleteBundle(localCacheBundle, filesystem) Then
+                localCacheBundle = ""
+            End If
+        End If
+    End If
+    On Error GoTo ReleaseUnavailable
+    pointerPath = filesystem.BuildPath(PACKAGED_RELEASE_ROOT, "current.txt")
+    If Not filesystem.FileExists(pointerPath) Then
+        Err.Raise vbObjectError + 414, , "The central Bonds Lite release pointer is unavailable"
+    End If
+    Set stream = filesystem.OpenTextFile(pointerPath, 1, False, 0)
+    releaseId = Trim$(stream.ReadAll)
+    stream.Close
+    If Not pattern.Test(releaseId) Then
+        Err.Raise vbObjectError + 415, , "The central Bonds Lite release pointer is invalid"
+    End If
+    If releaseId = localReleaseId And Len(localCacheBundle) > 0 Then
+        ResolveLocalBundle = localCacheBundle
+        Exit Function
+    End If
+    sourceBundle = filesystem.BuildPath( _
+        filesystem.BuildPath(filesystem.BuildPath(PACKAGED_RELEASE_ROOT, "releases"), releaseId), _
+        "Bonds Lite App")
+    If Not CompleteBundle(sourceBundle, filesystem) Then
+        If Len(localCacheBundle) > 0 Then
+            Application.StatusBar = "Bonds Lite update unavailable; using cached release " & localReleaseId
+            mCurrentLocalBundle = localCacheBundle
+            ResolveLocalBundle = localCacheBundle
+            Exit Function
+        End If
+        Err.Raise vbObjectError + 416, , "The selected central Bonds Lite release is incomplete"
+    End If
+    cacheRelease = filesystem.BuildPath(cacheRoot, releaseId)
+    cacheBundle = filesystem.BuildPath(cacheRelease, "Bonds Lite App")
+    If filesystem.FolderExists(cacheRelease) Then
+        If Not CompleteBundle(cacheBundle, filesystem) Then
+            Err.Raise vbObjectError + 418, , "The local Bonds Lite cache is incomplete; contact support"
+        End If
+    Else
+        stagingRelease = filesystem.BuildPath( _
+            cacheRoot, releaseId & ".partial-" & Format$(Now, "yyyymmddhhnnss") & "-" & _
+            CStr(CLng(Timer * 1000)))
+        stagingBundle = filesystem.BuildPath(stagingRelease, "Bonds Lite App")
+        filesystem.CreateFolder stagingRelease
+        Application.StatusBar = "Copying Bonds Lite application to local runtime. First use may take a few minutes..."
+        DoEvents
+        filesystem.CopyFolder sourceBundle, stagingBundle, False
+        If Not CompleteBundle(stagingBundle, filesystem) Then
+            Err.Raise vbObjectError + 419, , "The copied Bonds Lite application is incomplete"
+        End If
+        filesystem.MoveFolder stagingRelease, cacheRelease
+    End If
+    On Error GoTo CopyFailed
+    pointerTemporary = localPointer & ".tmp"
+    Set stream = filesystem.CreateTextFile(pointerTemporary, True, False)
+    stream.WriteLine releaseId
+    stream.Close
+    If filesystem.FileExists(localPointer) Then filesystem.DeleteFile localPointer, True
+    filesystem.MoveFile pointerTemporary, localPointer
+    Application.StatusBar = False
+    mCurrentLocalBundle = cacheBundle
+    ResolveLocalBundle = cacheBundle
+    Exit Function
+ReleaseUnavailable:
+    errorNumber = Err.Number
+    errorMessage = Err.Description
+    On Error Resume Next
+    If Len(stagingRelease) > 0 Then
+        If filesystem.FolderExists(stagingRelease) Then filesystem.DeleteFolder stagingRelease, True
+    End If
+    Application.StatusBar = False
+    If Len(pointerTemporary) > 0 Then
+        If filesystem.FileExists(pointerTemporary) Then filesystem.DeleteFile pointerTemporary, True
+    End If
+    On Error GoTo 0
+    If Len(localCacheBundle) > 0 Then
+        Application.StatusBar = "Bonds Lite update unavailable; using cached release " & localReleaseId
+        ResolveLocalBundle = localCacheBundle
+        mCurrentLocalBundle = localCacheBundle
+        Exit Function
+    End If
+    Err.Raise errorNumber, , "Unable to read a complete central release and no complete local cache exists: " & errorMessage
+CopyFailed:
+    errorNumber = Err.Number
+    errorMessage = Err.Description
+    On Error Resume Next
+    If Len(stagingRelease) > 0 Then
+        If filesystem.FolderExists(stagingRelease) Then filesystem.DeleteFolder stagingRelease, True
+    End If
+    Application.StatusBar = False
+    On Error GoTo 0
+    If Len(pointerTemporary) > 0 Then
+        If filesystem.FileExists(pointerTemporary) Then filesystem.DeleteFile pointerTemporary, True
+    End If
+    Err.Raise errorNumber, , "Unable to prepare the local Bonds Lite runtime: " & errorMessage
+End Function
+
+Public Sub GenerateBondsLiteInput()
+    LaunchBondsLite 1
+End Sub
+
+Public Sub RunBondsLite()
+    LaunchBondsLite 2
+End Sub
+
+Public Function LocalControllerFullName(ByVal localDraft As String) As String
+    Dim filesystem As Object
+    Set filesystem = CreateObject("Scripting.FileSystemObject")
+    LocalControllerFullName = filesystem.BuildPath( _
+        CurrentLocalBundle(), "Controller\BondsLiteController.exe")
+End Function
+
+Private Sub LaunchBondsLite(ByVal stage As Long)
+    On Error GoTo Failed
+    Dim shell As Object, filesystem As Object, localDraft As String
+    Dim bundle As String, controller As String, command As String
+    Set shell = CreateObject("WScript.Shell")
+    Set filesystem = CreateObject("Scripting.FileSystemObject")
+    localDraft = LocalDraftFullName()
+    controller = LocalControllerFullName(localDraft)
+    command = QuoteArgument(controller) & " --pause --caller " & _
+        QuoteArgument(ThisWorkbook.FullName) & " --caller-local " & _
+        QuoteArgument(localDraft) & " --excel-hwnd " & CStr(Application.Hwnd) & _
+        " --stage " & CStr(stage)
+    shell.Run command, 1, False
+    Exit Sub
+Failed:
+    MsgBox Err.Description, vbExclamation, "Bonds Lite"
+End Sub
+'''
+
+
 class BondsLiteError(ValueError):
     """An actionable input or Excel workflow validation failure."""
 
@@ -930,6 +1272,9 @@ def publish_output(working_path: Path, output_folder: Path, timestamp: datetime)
 
 def _caller_path(caller: xw.Book) -> Path:
     """Use the caller's local synchronised path, not its native SharePoint URL."""
+    local_path = _local_caller_path.get()
+    if local_path is not None:
+        return local_path
     value = caller.fullname
     if not value or re.match(r"^[a-z]+://", value, re.IGNORECASE):
         raise BondsLiteError("Save and open Draft from its local synchronised folder")
@@ -1500,7 +1845,6 @@ def excel_state(application: xw.App) -> Iterator[None]:
         "EnableEvents": False,
         "DisplayAlerts": False,
         "ScreenUpdating": False,
-        "Calculation": -4135,
         "CalculateBeforeSave": False,
     }
     with timed_stage("Read Excel settings"):
@@ -1585,8 +1929,12 @@ def validate_inputs(caller: xw.Book) -> StageOneInputs:
 def synchronise_controls(settings: StageOneInputs, working: xw.Book) -> None:
     """Synchronise only the approved valuation date and entity controls."""
     destination = working.sheets["I. Control"]
-    destination.range("D10").value = settings.valuation_date
-    destination.range("D13").value = settings.entity
+    date_cell = destination.range("D10")
+    entity_cell = destination.range("D13")
+    if date_cell.value != settings.valuation_date:
+        date_cell.value = settings.valuation_date
+    if entity_cell.value != settings.entity:
+        entity_cell.value = settings.entity
 
 
 def _model_output_cell(working: xw.Book) -> xw.Range:
@@ -1674,9 +2022,8 @@ def refresh_and_validate(working: xw.Book, columns: list[int], timeout: float = 
                 f"Required formula dependency could not be refreshed: {link}\n"
                 "Check the dependency workbook and its referenced sheets in Excel"
             ) from error
-    for worksheet in working.sheets:
-        with timed_stage(f"Calculate worksheet: {worksheet.name}"):
-            worksheet.api.Calculate()
+    with timed_stage("Calculate formula dependencies (Excel F9)"):
+        working.app.api.Calculate()
     with timed_stage("Wait for Excel calculation"):
         while working.app.api.CalculationState == 1:
             if time.monotonic() - started > timeout:
@@ -1866,14 +2213,15 @@ def _generate_dataset_input(
                 with timed_stage(f"Copy {dataset} input template"):
                     shutil.copy2(settings.template_path, working_path)
                 with owned_book(application, working_path, read_only=False) as working:
-                    with timed_stage(f"Import {dataset} data and resize table"):
-                        rows, columns = populate_bond_data(data, working)
-                        logger.info(f"Imported {rows} {dataset} rows")
-                    with timed_stage(f"Populate {dataset} credit sensitivities"):
-                        populate_credit_stresses(settings, working, settings.stresses)
-                    with timed_stage(f"Set {dataset} controls and model output folder"):
-                        synchronise_controls(settings, working)
-                        set_model_output_folder(working, model_output_folder)
+                    with application.properties(calculation="manual"):
+                        with timed_stage(f"Import {dataset} data and resize table"):
+                            rows, columns = populate_bond_data(data, working)
+                            logger.info(f"Imported {rows} {dataset} rows")
+                        with timed_stage(f"Populate {dataset} credit sensitivities"):
+                            populate_credit_stresses(settings, working, settings.stresses)
+                        with timed_stage(f"Set {dataset} controls and model output folder"):
+                            synchronise_controls(settings, working)
+                            set_model_output_folder(working, model_output_folder)
                     with timed_stage(f"Refresh {dataset} formulas"):
                         refresh_and_validate(working, columns)
                     with timed_stage(f"Save {dataset} input"):
@@ -2025,7 +2373,7 @@ def _installer_excel_application() -> Iterator[xw.App]:
         application.api.Quit()
 
 
-def install_button(caller: Path) -> Path:
+def install_button(caller: Path, packaged: bool = False) -> Path:
     """Install the launcher into a closed Draft workbook, preserving a backup."""
     import xlwings as xw
 
@@ -2058,7 +2406,9 @@ def install_button(caller: Path) -> Path:
             else:
                 module = components.Add(1)
                 module.Name = "modBondsLiteLauncher"
-            module.CodeModule.AddFromString(VBA_LAUNCHER)
+            module.CodeModule.AddFromString(
+                PACKAGED_VBA_LAUNCHER if packaged else VBA_LAUNCHER
+            )
             sheet = book.sheets["I. Control"]
             anchor = sheet.range("D74:F76")
             _install_stage_button(
@@ -2090,18 +2440,33 @@ def main() -> int:
     configure_console_logging()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--install-button", type=Path)
+    parser.add_argument("--packaged", action="store_true")
     parser.add_argument("--caller")
+    parser.add_argument("--caller-local", type=Path)
     parser.add_argument("--excel-hwnd", type=int)
     parser.add_argument("--pause", action="store_true", help="Wait for Enter after a run")
     parser.add_argument("--stage", choices=("1", "2"), default="1")
+    parser.add_argument("--self-test", action="store_true")
     arguments = parser.parse_args()
     if arguments.install_button:
-        backup = install_button(arguments.install_button)
+        backup = install_button(arguments.install_button, packaged=arguments.packaged)
         logger.info(f"Button installed; original backup: {backup}")
         return 0
+    if arguments.self_test:
+        import openpyxl
+        import pythoncom
+        import xlwings
+
+        config = load_model_config(Path.cwd() / "Draft.xlsm")
+        preflight_model_environment(config)
+        print("CONTROLLER_SELF_TEST_OK", flush=True)
+        return 0
+    if getattr(sys, "frozen", False):
+        _validate_packaged_bundle(Path(sys.executable).resolve().parent.parent)
     if not arguments.caller or arguments.excel_hwnd is None:
         parser.error("Specify --caller and --excel-hwnd, or --install-button")
     result = 0
+    caller_path_token = None
     with run_progress() as progress:
         logger.info(
             "Bonds Lite input started | timings exclude Python startup and the Enter wait"
@@ -2119,6 +2484,11 @@ def main() -> int:
                 ]
                 if len(matches) != 1:
                     raise BondsLiteError("The exact calling workbook is no longer open")
+            if arguments.caller_local is not None:
+                local_caller = arguments.caller_local.expanduser().resolve(strict=True)
+                if not local_caller.is_file():
+                    raise BondsLiteError(f"Local Draft path is not a file: {local_caller}")
+                caller_path_token = _local_caller_path.set(local_caller)
             if arguments.stage == "2":
                 output = run_stage_two(matches[0])
                 if output is None:
@@ -2134,6 +2504,9 @@ def main() -> int:
         except Exception as error:
             logger.error(f"Bonds Lite input failed: {error}")
             result = 1
+        finally:
+            if caller_path_token is not None:
+                _local_caller_path.reset(caller_path_token)
     logger.info(f"Total processing time: {time.perf_counter() - progress.started:.1f}s")
     if arguments.pause:
         try:

@@ -1,0 +1,10 @@
+PyInstaller==6.22.3
+pyinstaller-hooks-contrib==2026.9
+numpy==1.26.4
+pandas==2.2.3
+scipy==1.14.1
+numba==0.61.2
+llvmlite==0.44.0
+xlwings==0.36.14
+pywin32==308
+python-dateutil==2.9.0.post0

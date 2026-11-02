@@ -1,25 +1,47 @@
 # Bonds Lite Input Setup And Use
 
-Version 0.8 | 28 October 2026
+Version 0.9 | 30 October 2026 | Local-cache deployment in progress
 
 ## Overview
 
-Generate Bonds Lite Input on the Draft workbook's I. Control sheet starts the Python workflow through a small VBA launcher. Stage 1 prepares two validated inputs, Bonds and MAP, using one template and one captured set of date/entity/stresses. Both must succeed before the run folder becomes eligible for Stage 2.
+Generate Bonds Lite Input on the Draft workbook's I. Control sheet starts the workflow through a small VBA launcher. Stage 1 prepares two validated inputs, Bonds and MAP, using one template and one captured set of date/entity/stresses. Both must succeed before the run folder becomes eligible for Stage 2. Stage 2 runs the unchanged folder-based Bonds Lite batch against that exact pair.
 
-Python orchestrates native Excel copying, destination-only formula refresh and console progress. The movable Stage 1 panel links to the completed timestamped run folder. Run Bonds Lite invokes the unchanged folder-based model batch from a separately configured Python 3.11 environment. The default suite passed 593 tests before the final scenario-prerequisite check; the focused metadata suite then passed 28 tests. Isolated Excel assertions passed individually, though native RPC shutdown diagnostics appeared during test cleanup.
+The planned colleague deployment uses frozen controller/model executables cached under the current Windows user's LocalAppData. Draft stays in the user's locally synced SharePoint/OneDrive folder; the launcher resolves that user's local Draft path and attaches to the exact open Excel instance. The central release share is checked once at the first button click in each Excel session. Later clicks use the local cache without network access. This deployment is not yet built or installed; until rollout is accepted, use the maintainer source-mode setup below.
 
 ## Prerequisites
 
 - Windows desktop Excel; Excel in a browser is not supported.
-- An Anaconda Python 3.13 environment. The verified environment is Python 3.13.5 with xlwings 0.32.1.
-- The Bonds Lite model's separate Python 3.11 environment, with NumPy, pandas, xlwings, SciPy and python-dateutil available. Imports and version are checked before the audit or results change.
-- The existing Bonds Lite Batch project, including run_bonds_batch.py; model files are not changed by this workflow.
+- Draft must be locally synced from SharePoint/OneDrive before opening in desktop Excel. The workflow does not support Excel's browser URL as a filesystem path.
+- Colleagues need central release-share access on the first click in each Excel session, write access to their LocalAppData cache, and normal permission to run the approved VBA/executables. They do not install Python or configure interpreter paths after the packaged release is deployed.
+- Maintainers using source mode need Python 3.13, the model's separate Python 3.11 environment, and the existing Bonds Lite Batch project. Model files remain unchanged.
 - The JRC Excel add-in that provides `_xll.JRC_SpotAnnual` must be available in the Excel session used to run Stage 1. Use the installed Draft button from that session; a separate automation Excel instance may not have the add-in.
 - The project folder, including pyproject.toml and src, available at a stable local or synchronised location.
 - Access to the selected data/template files and all saved external workbooks required by the destination formulas.
 - Permission to run the known Draft macro under your organisation's Excel policy. No xlwings Excel add-in is required. Do not enable all macros or weaken global security settings.
 
 ## Installation
+
+### Colleagues: Packaged Runtime
+
+Once the packaged release is built and approved, open the Draft from its local
+OneDrive-synced folder in desktop Excel. The first button click in each Excel
+session checks the central release pointer and copies a changed release into
+LocalAppData, with an Excel status message during copying. The workbook then
+launches the cached controller/model locally. Later clicks in that Excel
+session do not contact the release share. No Python installation or
+environment-variable setup is required.
+
+The central share is a package source only; the workbook never launches an
+executable from UNC or from inside the OneDrive sync tree. Keep the Draft's
+existing scenario inputs, templates and output paths as configured; those data
+paths are separate from the application cache. Do not copy application files
+between releases or delete LocalAppData cache folders while a run is active.
+
+**Deployment status:** the source implementation is in progress. No new package
+has been built, promoted or installed into the production Draft yet. Use the
+maintainer source-mode instructions below until the maintainer confirms rollout.
+
+### Maintainers: Source Mode
 
 Run these commands in PowerShell from the project folder, adjusting the Anaconda path if needed:
 
@@ -34,7 +56,7 @@ After changing either model environment variable, fully close and restart Excel 
 
 If the model project is elsewhere, set the optional per-user `BONDS_LITE_MODEL_DIR` to the folder containing `run_bonds_batch.py`. Otherwise it resolves relative to Draft as `../../02 Sensitivities/2025/05 ORSA/Models/Bonds Lite Batch/bonds-hm-cst`. There is no fallback to the controller's Python 3.13 environment.
 
-The editable installation points to this project folder. Keep the folder in place; repeat installation if it moves. Each colleague installs into their own environment and sets their own interpreter path.
+The editable installation points to this project folder. Keep the folder in place; repeat installation if it moves. Each source-mode maintainer configures their own interpreter paths.
 
 The supplied Draft workbook already has the button and audit panel installed. If installation or reinstallation is required, close Draft in Excel and run:
 
@@ -47,6 +69,9 @@ Installation requires Excel to allow programmatic access to the VBA project unde
 The Stage 1 panel was initially installed at I. Control!H73:O83. Stage 2 adds its own named panel below the current Stage 1 panel and controls. Installation checks occupied cells, merges and shape overlap and preserves the existing Stage 1 button geometry on reinstall. Keep Draft saved and closed; a timestamped backup is made before installation.
 
 ## Configuration
+
+The following Python environment variables are for maintainer source mode only.
+The packaged colleague runtime does not read them.
 
 | Setting | Type | Value And Effect |
 | --- | --- | --- |
@@ -69,7 +94,7 @@ The supplied source was rescanned as B8:ATT1066, or 1,058 bond rows; the supplie
 
 ## Use
 
-1. Save Draft in its local or UNC folder and open it in desktop Excel.
+1. Save Draft in its local or locally synced OneDrive folder and open it in desktop Excel. Do not open it in a browser.
 2. Set D39 to Bonds data, D40 to MAP data and D42 to the shared template. Close those files and required external dependency workbooks in this Excel instance before running. Dependencies must contain the saved data you intend to use. A blank D40 blocks generation; no MAP filename is assumed.
 3. Confirm date/entity and populate every required numeric stress cell. Genuine zero is valid; a blank is not zero.
 4. On I. Credit Stresses, use C:J, M:DI and DL:HH for each row group 9:15, 20:26, 31:37 and 42:48. These are the four transition matrices and the two spread grids per currency/sector.

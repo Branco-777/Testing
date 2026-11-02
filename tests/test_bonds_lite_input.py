@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import sys
 import threading
 import time
@@ -17,6 +18,7 @@ from itertools import groupby
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterator
+from unittest.mock import Mock
 
 import pytest
 
@@ -1220,6 +1222,427 @@ def test_launcher_uses_configured_python_without_an_addin() -> None:
     assert "--pause" in VBA_LAUNCHER
 
 
+def _create_packaged_release(
+    release_root: Path, release_id: str = "20261030-stages-v1",
+) -> Path:
+    """Create a local-only release using the manifest emitted by the builder."""
+    import hashlib
+
+    bundle = release_root / "releases" / release_id / "Bonds Lite App"
+    controller = bundle / "Controller" / "BondsLiteController.exe"
+    model = bundle / "Model" / "BondsLiteModel.exe"
+    controller.parent.mkdir(parents=True)
+    model.parent.mkdir(parents=True)
+    controller.write_bytes(b"controller executable sentinel")
+    model.write_bytes(b"model executable sentinel")
+    manifest = {
+        "release_id": release_id,
+        "built_utc": "2026-10-30T00:00:00+00:00",
+        "model_source_sha256": {
+            name: "0" * 64
+            for name in ("run_bonds_batch.py", "BondsModelHandler.py", "pyBondsHMutils.py")
+        },
+        "controller_sha256": hashlib.sha256(controller.read_bytes()).hexdigest(),
+        "model_executable_sha256": hashlib.sha256(model.read_bytes()).hexdigest(),
+        "layout": "Controller/BondsLiteController.exe; Model/BondsLiteModel.exe",
+        "prerequisites": "Windows desktop Excel and model scenario access",
+    }
+    (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8")
+    release_root.mkdir(parents=True, exist_ok=True)
+    (release_root / "current.txt").write_text(release_id, encoding="utf-8")
+    return bundle
+
+
+def test_validate_packaged_bundle_checks_local_manifest_and_executable_hashes(
+    tmp_path: Path,
+) -> None:
+    import bonds_lite_input as workflow
+
+    bundle = _create_packaged_release(tmp_path / "release source")
+    manifest = workflow._validate_packaged_bundle(bundle, "20261030-stages-v1")
+    assert manifest["release_id"] == "20261030-stages-v1"
+
+    model = bundle / "Model" / "BondsLiteModel.exe"
+    model.write_bytes(b"modified model fixture")
+    with pytest.raises(BondsLiteError, match=r"(?i)hash mismatch"):
+        workflow._validate_packaged_bundle(bundle, "20261030-stages-v1")
+
+
+def test_packaged_launcher_uses_release_only_as_copy_source_and_launches_cache() -> None:
+    import bonds_lite_input as workflow
+
+    launcher = workflow.PACKAGED_VBA_LAUNCHER
+    compact = re.sub(r"\s*_\s*\r?\n\s*", "", launcher)
+    assert "current.txt" in launcher
+    assert "CopyFolder" in launcher
+    assert "Bonds Lite App" in launcher
+    assert re.search(r"(?i)Controller\\BondsLiteController\.exe", compact)
+    assert "LOCALAPPDATA" in launcher.upper()
+    assert "mCurrentLocalBundle" in launcher
+    assert re.search(r"(?i)controller\s*=\s*LocalControllerFullName\(localDraft\)", compact)
+    command_assignment = re.search(
+        r"(?is)\bcommand\s*=(.*?)(?=\bshell\.Run\b)", compact
+    )
+    assert command_assignment is not None
+    command = command_assignment.group(1)
+    assert re.search(r"(?i)\bcontroller\b", command)
+    assert re.search(r"(?i)ThisWorkbook\.FullName", launcher)
+    assert re.search(r"(?i)QuoteArgument\(localDraft\)", command)
+    assert re.search(r"(?i)Application\.Hwnd", command)
+    assert "BONDS_LITE_PYTHON" not in launcher
+    assert "BONDS_LITE_MODEL_PYTHON" not in launcher
+    assert not re.search(r"(?i)\bshell\s*\.\s*CurrentDirectory\s*=", compact)
+    assert "shell.Run command, 1, False" in launcher
+
+
+def test_packaged_launcher_checks_central_pointer_once_per_excel_session() -> None:
+    import bonds_lite_input as workflow
+
+    launcher = workflow.PACKAGED_VBA_LAUNCHER
+    assert "localPointer" in launcher
+    assert "mCurrentLocalBundle" in launcher
+    assert "PACKAGED_RELEASE_ROOT" in launcher
+    assert "current.txt" in launcher
+    assert "RefreshBondsLiteCache" not in launcher
+    assert "ResolveLocalBundle(True)" not in launcher
+    assert "LOCALAPPDATA" in launcher.upper()
+    assert "Copying Bonds Lite application" in launcher
+
+
+def test_packaged_builder_publishes_versioned_central_copy_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tools import build_packaged_stages as builder
+
+    project = Path(__file__).resolve().parents[1]
+    model_dir = tmp_path / "model source"
+    model_dir.mkdir()
+    for name in ("run_bonds_batch.py", "BondsModelHandler.py", "pyBondsHMutils.py"):
+        (model_dir / name).write_text("source sentinel", encoding="utf-8")
+    release_root = tmp_path / "central release source"
+    monkeypatch.setattr(builder, "CENTRAL_RELEASE_ROOT", release_root, raising=False)
+
+    def build_application(
+        python: Path, entry: Path, name: str, build_root: Path, dist: Path,
+        project: Path, model: Path | None = None, clean: bool = False,
+    ) -> Path:
+        application = dist / name
+        application.mkdir(parents=True)
+        (application / f"{name}.exe").write_bytes(b"executable sentinel")
+        return application
+
+    monkeypatch.setattr(builder, "build", build_application)
+    monkeypatch.setattr(builder, "run", lambda *args, **kwargs: "self-test passed")
+    monkeypatch.setattr(
+        builder, "collect_licences",
+        lambda python, destination, project: destination.mkdir(parents=True),
+    )
+    monkeypatch.setattr(
+        sys, "argv",
+        [
+            "build_packaged_stages", "--controller-python", sys.executable,
+            "--model-python", sys.executable, "--model-dir", str(model_dir),
+            "--build-root", str(tmp_path / "build cache"),
+            "--release-id", "test-local-cache-source", "--promote",
+        ],
+    )
+
+    assert builder.main() == 0
+
+    release = release_root / "releases" / "test-local-cache-source" / "Bonds Lite App"
+    assert (release / "release.json").is_file()
+    assert (release / "Controller" / "BondsLiteController.exe").is_file()
+    assert (release / "Model" / "BondsLiteModel.exe").is_file()
+    assert (release_root / "current.txt").read_bytes() == b"test-local-cache-source"
+
+
+@pytest.mark.excel
+@pytest.mark.skipif(
+    os.environ.get("BONDS_LITE_RUN_STAGE_PANEL_EXCEL_TESTS") != "1",
+    reason="Set BONDS_LITE_RUN_STAGE_PANEL_EXCEL_TESTS=1",
+)
+def test_excel_packaged_launcher_copies_release_and_resolves_local_controller(
+    stage_panel_excel_book: Any, tmp_path: Path,
+) -> None:
+    import bonds_lite_input as workflow
+
+    book = stage_panel_excel_book
+    caller = tmp_path / "SharePoint user" / "Draft copy.xlsm"
+    caller.parent.mkdir(parents=True)
+    book.api.SaveAs(str(caller), FileFormat=52)
+
+    release_root = tmp_path / "central release source"
+    release = _create_packaged_release(release_root)
+    launcher = workflow.PACKAGED_VBA_LAUNCHER.replace(
+        r"\\server090\internal model$\29 Financial Resilience\Sandbox\SST spreadsheet executable file",
+        str(release_root),
+    )
+    cache_root = tmp_path / "user local app data"
+    cache_root.mkdir()
+    launcher = launcher.replace(
+        'shell.ExpandEnvironmentStrings("%LOCALAPPDATA%")',
+        '"' + str(cache_root).replace('"', '""') + '"',
+    )
+    launcher = launcher.replace(
+        "Private Function CurrentLocalBundle()",
+        "Public Function CurrentLocalBundle()",
+    )
+    module = book.api.VBProject.VBComponents.Add(1)
+    module.Name = "modPackagedLauncher"
+    module.CodeModule.AddFromString(launcher)
+
+    local_draft = book.app.api.Run(
+        "'" + book.name.replace("'", "''") + "'!LocalDraftFullName"
+    )
+    local_bundle = book.app.api.Run(
+        "'" + book.name.replace("'", "''") + "'!CurrentLocalBundle"
+    )
+    controller = book.app.api.Run(
+        "'" + book.name.replace("'", "''") + "'!LocalControllerFullName",
+        str(local_draft),
+    )
+
+    expected_bundle = cache_root / "BondsLite" / "releases" / "20261030-stages-v1" / "Bonds Lite App"
+    assert Path(local_draft).resolve() == caller.resolve()
+    assert Path(local_bundle).resolve() == expected_bundle.resolve()
+    assert Path(controller).resolve() == (
+        expected_bundle / "Controller" / "BondsLiteController.exe"
+    ).resolve()
+    assert (expected_bundle / "Model" / "BondsLiteModel.exe").is_file()
+    assert (expected_bundle / "release.json").is_file()
+    (release_root / "current.txt").unlink()
+    warm_bundle = book.app.api.Run(
+        "'" + book.name.replace("'", "''") + "'!CurrentLocalBundle"
+    )
+    assert Path(warm_bundle).resolve() == expected_bundle.resolve()
+
+
+@pytest.mark.excel
+@pytest.mark.skipif(
+    os.environ.get("BONDS_LITE_RUN_STAGE_PANEL_EXCEL_TESTS") != "1",
+    reason="Set BONDS_LITE_RUN_STAGE_PANEL_EXCEL_TESTS=1",
+)
+def test_excel_cache_falls_back_to_previous_bundle_when_new_release_incomplete(
+    stage_panel_excel_book: Any, tmp_path: Path,
+) -> None:
+    import bonds_lite_input as workflow
+
+    book = stage_panel_excel_book
+    caller = tmp_path / "SharePoint user" / "Draft fallback.xlsm"
+    caller.parent.mkdir(parents=True)
+    book.api.SaveAs(str(caller), FileFormat=52)
+
+    release_root = tmp_path / "central release source"
+    release_root.mkdir()
+    (release_root / "current.txt").write_text("new-release", encoding="ascii")
+    local_app_data = tmp_path / "Local App Data"
+    local_root = local_app_data / "BondsLite"
+    cached = local_root / "releases" / "old-release" / "Bonds Lite App"
+    for relative in (
+        Path("Controller/BondsLiteController.exe"),
+        Path("Model/BondsLiteModel.exe"),
+        Path("release.json"),
+    ):
+        target = cached / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("sentinel", encoding="ascii")
+    (local_root / "current.txt").write_text("old-release", encoding="ascii")
+
+    launcher = workflow.PACKAGED_VBA_LAUNCHER.replace(
+        r"\\server090\internal model$\29 Financial Resilience\Sandbox\SST spreadsheet executable file",
+        str(release_root),
+    ).replace(
+        'shell.ExpandEnvironmentStrings("%LOCALAPPDATA%")',
+        '"' + str(local_app_data).replace('"', '""') + '"',
+    ).replace(
+        "Private Function CurrentLocalBundle()",
+        "Public Function CurrentLocalBundle()",
+    )
+    module = book.api.VBProject.VBComponents.Add(1)
+    module.Name = "modPackagedLauncher"
+    module.CodeModule.AddFromString(launcher)
+
+    actual = book.app.api.Run(
+        "'" + book.name.replace("'", "''") + "'!CurrentLocalBundle"
+    )
+
+    assert Path(actual).resolve() == cached.resolve()
+    assert "cached release" in str(book.app.api.StatusBar).casefold()
+
+
+@pytest.mark.parametrize("packaged", [False, True])
+def test_install_button_selects_packaged_launcher_or_source_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, packaged: bool,
+) -> None:
+    import bonds_lite_input as workflow
+
+    caller = tmp_path / "Draft.xlsm"
+    caller.write_bytes(b"disposable caller")
+    installed: list[str] = []
+    code_module = SimpleNamespace(
+        CountOfLines=0, AddFromString=installed.append,
+        DeleteLines=lambda *args: None,
+    )
+    component = SimpleNamespace(Name="modBondsLiteLauncher", CodeModule=code_module)
+    components = SimpleNamespace(
+        Count=0, Add=lambda kind: component,
+        Item=lambda *args: component,
+    )
+    panel = SimpleNamespace(row=100, left=500, rows=SimpleNamespace(count=10))
+    sheet = SimpleNamespace(
+        range=lambda *args: SimpleNamespace(left=0, value=None)
+    )
+    book = SimpleNamespace(
+        api=SimpleNamespace(
+            ReadOnly=False,
+            VBProject=SimpleNamespace(VBComponents=components),
+        ),
+        names={"SST_Stage2_Panel": SimpleNamespace(refers_to_range=panel)},
+        sheets={"I. Control": sheet}, save=lambda: None, close=lambda: None,
+    )
+    application = SimpleNamespace(
+        api=SimpleNamespace(Quit=lambda: None), display_alerts=False,
+        books=SimpleNamespace(open=lambda *args, **kwargs: book),
+    )
+    monkeypatch.setitem(
+        sys.modules, "xlwings",
+        SimpleNamespace(App=lambda **kwargs: application, apps=[]),
+    )
+    monkeypatch.setattr(workflow, "initialise_stage_panel", lambda target: None)
+    monkeypatch.setattr(workflow, "initialise_stage_two_panel", lambda target: None)
+    monkeypatch.setattr(workflow, "_install_stage_button", lambda *args: None)
+
+    options = {"packaged": True} if packaged else {}
+    workflow.install_button(caller, **options)
+
+    expected = workflow.PACKAGED_VBA_LAUNCHER if packaged else workflow.VBA_LAUNCHER
+    assert installed == [expected]
+
+
+def test_load_model_config_uses_sibling_executable_without_user_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bonds_lite_input as workflow
+
+    controller = tmp_path / "Bonds Lite App" / "Controller" / "BondsLiteController.exe"
+    controller.parent.mkdir(parents=True)
+    controller.touch()
+    model = controller.parent.parent / "Model" / "BondsLiteModel.exe"
+    model.parent.mkdir()
+    model.touch()
+    runtime = model.parent / "_internal" / "python311.dll"
+    runtime.parent.mkdir()
+    runtime.touch()
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(controller))
+    monkeypatch.setenv("BONDS_LITE_MODEL_PYTHON", "not-used.exe")
+    monkeypatch.setattr(
+        workflow, "_user_environment_value",
+        lambda name: pytest.fail("Packaged mode must not read user Python settings"),
+    )
+
+    config = workflow.load_model_config(tmp_path / "Draft.xlsm")
+
+    assert config.python_executable == model
+    assert config.model_dir == model.parent
+    assert config.packaged is True
+
+
+def test_packaged_model_preflight_checks_sibling_runtime_without_subprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+
+    import bonds_lite_input as workflow
+
+    executable = tmp_path / "Model" / "BondsLiteModel.exe"
+    executable.parent.mkdir()
+    executable.touch()
+    runtime = executable.parent / "_internal" / "python311.dll"
+    runtime.parent.mkdir()
+    runtime.touch()
+    config = workflow.ModelConfig(executable, executable.parent, packaged=True)
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *args, **kwargs: pytest.fail("Frozen preflight must not spawn Python"),
+    )
+
+    workflow.preflight_model_environment(config)
+
+    runtime.unlink()
+    with pytest.raises(BondsLiteError, match=r"(?i)runtime|bundle"):
+        workflow.preflight_model_environment(config)
+
+
+def test_frozen_main_validates_cached_bundle_before_stage_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    console_logger: logging.Logger, reporting_threads: list[Any],
+) -> None:
+    import bonds_lite_input as workflow
+
+    controller = tmp_path / "Bonds Lite App" / "Controller" / "BondsLiteController.exe"
+    controller.parent.mkdir(parents=True)
+    controller.touch()
+    caller = tmp_path / "Draft.xlsm"
+    caller.touch()
+    book = SimpleNamespace(api=SimpleNamespace(FullName=str(caller)))
+    application = SimpleNamespace(api=SimpleNamespace(Hwnd=731), books=[book])
+    validated: list[Path] = []
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(controller))
+    monkeypatch.setitem(sys.modules, "xlwings", SimpleNamespace(apps=[application]))
+    monkeypatch.setattr(workflow, "_validate_packaged_bundle", lambda path: validated.append(path))
+    monkeypatch.setattr(workflow, "run_stage_one", lambda current_book: tmp_path / "output")
+
+    assert workflow.main(["--caller", str(caller), "--excel-hwnd", "731"]) == 0
+    assert validated == [controller.parent.parent]
+    assert all(reporter.joined for reporter in reporting_threads)
+
+
+def test_caller_path_uses_resolved_local_path_for_sharepoint_workbook(
+    tmp_path: Path,
+) -> None:
+    import bonds_lite_input as workflow
+
+    local_draft = tmp_path / "User A" / "OneDrive - Just Group" / "Draft.xlsm"
+    local_draft.parent.mkdir(parents=True)
+    local_draft.touch()
+    caller = SimpleNamespace(fullname="https://tenant.sharepoint.com/sites/team/Draft.xlsm")
+    token = workflow._local_caller_path.set(local_draft)
+    try:
+        assert workflow._caller_path(caller) == local_draft.resolve()
+    finally:
+        workflow._local_caller_path.reset(token)
+
+
+def test_main_keeps_native_sharepoint_identity_and_uses_local_caller_path(
+    monkeypatch: pytest.MonkeyPatch, console_logger: logging.Logger,
+    reporting_threads: list[Any], tmp_path: Path,
+) -> None:
+    import bonds_lite_input as workflow
+
+    native_name = "https://tenant.sharepoint.com/sites/team/Draft.xlsm"
+    local_draft = tmp_path / "User A" / "OneDrive - Just Group" / "Draft.xlsm"
+    local_draft.parent.mkdir(parents=True)
+    local_draft.touch()
+    book = SimpleNamespace(api=SimpleNamespace(FullName=native_name))
+    application = SimpleNamespace(api=SimpleNamespace(Hwnd=731), books=[book])
+    used_paths: list[Path] = []
+    monkeypatch.setitem(sys.modules, "xlwings", SimpleNamespace(apps=[application]))
+    monkeypatch.setattr(sys, "argv", [
+        "bonds_lite_input", "--caller", native_name,
+        "--caller-local", str(local_draft), "--excel-hwnd", "731",
+    ])
+    monkeypatch.setattr(
+        workflow, "run_stage_one",
+        lambda current_book: used_paths.append(workflow._caller_path(current_book)) or local_draft,
+    )
+
+    assert workflow.main() == 0
+    assert used_paths == [local_draft.resolve()]
+    assert all(reporter.joined for reporter in reporting_threads)
+
+
 @pytest.mark.parametrize("username", ["Joao Branco", "Sarah Walker"])
 @pytest.mark.parametrize("cloud_path", [True, False])
 @pytest.mark.parametrize("matching", [True, False])
@@ -1386,10 +1809,10 @@ def test_main_install_button_is_noninteractive_by_default(
 
     caller = tmp_path / "Draft.xlsm"
     backup = tmp_path / "backup.xlsm"
-    received: list[Path] = []
+    received: list[tuple[Path, bool]] = []
 
-    def install(path: Path) -> Path:
-        received.append(path)
+    def install(path: Path, packaged: bool = False) -> Path:
+        received.append((path, packaged))
         return backup
 
     def forbidden(*args: Any, **kwargs: Any) -> None:
@@ -1404,10 +1827,53 @@ def test_main_install_button_is_noninteractive_by_default(
     monkeypatch.setattr(workflow, "notify_user", forbidden, raising=False)
     monkeypatch.setattr("builtins.input", forbidden)
     assert workflow.main() == 0
-    assert received == [caller]
+    assert received == [(caller, False)]
     assert str(backup) in capsys.readouterr().out
     assert all(reporter.joined for reporter in reporting_threads)
     assert not list(tmp_path.iterdir())
+
+
+def test_frozen_controller_self_test_uses_packaged_model_config(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    import bonds_lite_input as workflow
+
+    config = workflow.ModelConfig(Path("BondsLiteModel.exe"), Path("Model"), packaged=True)
+    observed = []
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "argv", ["BondsLiteController.exe", "--self-test"])
+    monkeypatch.setattr(workflow, "load_model_config", lambda caller: config)
+    monkeypatch.setattr(workflow, "preflight_model_environment", observed.append)
+    for module_name in ("openpyxl", "pythoncom", "xlwings"):
+        monkeypatch.setitem(sys.modules, module_name, SimpleNamespace())
+
+    assert workflow.main() == 0
+    assert observed == [config]
+    assert "CONTROLLER_SELF_TEST_OK" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("packaged", [False, True])
+def test_main_install_button_selects_packaged_launcher_explicitly(
+    monkeypatch: pytest.MonkeyPatch, console_logger: logging.Logger,
+    reporting_threads: list[Any], packaged: bool, tmp_path: Path,
+) -> None:
+    import bonds_lite_input as workflow
+
+    caller = tmp_path / "Draft.xlsm"
+    received: list[tuple[Path, bool]] = []
+
+    def install(path: Path, packaged: bool = False) -> Path:
+        received.append((path, packaged))
+        return tmp_path / "backup.xlsm"
+
+    argv = ["bonds_lite_input", "--install-button", str(caller)]
+    if packaged:
+        argv.append("--packaged")
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(workflow, "install_button", install)
+    assert workflow.main() == 0
+    assert received == [(caller, packaged)]
+    assert all(reporter.joined for reporter in reporting_threads)
 
 
 def test_workbook_mutex_is_stable_and_does_not_expose_paths(tmp_path: Path) -> None:
@@ -1935,7 +2401,10 @@ def test_refresh_does_not_wait_for_pending_manual_calculation(
     """Pending manual work is not active asynchronous Excel calculation."""
     import bonds_lite_input as workflow
 
-    calculated: list[bool] = []
+    calculate = Mock()
+
+    def forbidden_sheet_calculate() -> None:
+        pytest.fail("Calculate once at application level, not per worksheet")
 
     def forbidden_wait() -> None:
         pytest.fail("Do not poll when Excel is not actively calculating")
@@ -1952,11 +2421,13 @@ def test_refresh_does_not_wait_for_pending_manual_calculation(
     sheet = SimpleNamespace(
         name="I. Bonds Data",
         api=SimpleNamespace(
-            Calculate=lambda: calculated.append(True),
+            Calculate=forbidden_sheet_calculate,
             ListObjects=lambda name: table,
             Evaluate=lambda expression: 0,
         ),
     )
+    curve_sheet = _fake_model_base_curve()
+    curve_sheet.api.Calculate = forbidden_sheet_calculate
 
     class Sheets(dict):
         def __iter__(self):
@@ -1965,14 +2436,16 @@ def test_refresh_does_not_wait_for_pending_manual_calculation(
     working = SimpleNamespace(
         sheets=Sheets({
             "I. Bonds Data": sheet,
-            "P. Base Curves": _fake_model_base_curve(),
+            "P. Base Curves": curve_sheet,
         }),
-        app=SimpleNamespace(api=SimpleNamespace(CalculationState=calculation_state)),
+        app=SimpleNamespace(api=SimpleNamespace(
+            CalculationState=calculation_state, Calculate=calculate,
+        )),
     )
 
     workflow.refresh_and_validate(working, [2])
 
-    assert calculated == [True]
+    calculate.assert_called_once_with()
 
 
 def _fake_model_base_curve(error_count: int = 0, numeric_count: int = 3) -> Any:
@@ -2029,7 +2502,7 @@ def test_refresh_rejects_non_numeric_model_base_curve_values(
             "I. Bonds Data": bond_sheet,
             "P. Base Curves": _fake_model_base_curve(error_count=1, numeric_count=2),
         }),
-        app=SimpleNamespace(api=SimpleNamespace(CalculationState=0)),
+        app=SimpleNamespace(api=SimpleNamespace(CalculationState=0, Calculate=Mock())),
     )
 
     with pytest.raises(BondsLiteError, match=r"(?i)GBP SONIA.*numeric|numeric.*GBP SONIA"):
@@ -2075,7 +2548,9 @@ def test_refresh_warns_only_for_old_status_and_still_rejects_formula_errors(
             "I. Bonds Data": sheet,
             "P. Base Curves": _fake_model_base_curve(),
         }),
-        app=SimpleNamespace(api=SimpleNamespace(CalculationState=2), books=[]),
+        app=SimpleNamespace(
+            api=SimpleNamespace(CalculationState=2, Calculate=Mock()), books=[],
+        ),
         api=SimpleNamespace(
             UpdateLink=lambda Name, Type: updated.append(Name),
             LinkInfo=lambda *args: status,
@@ -2127,7 +2602,9 @@ def test_validate_entity_rejects_unsafe_names_without_renaming(entity: Any) -> N
 
 @pytest.fixture
 def input_controls(local_paths: tuple[Path, Path, Path, Path]) -> Any:
-    """Expose counted live values at the owned validation boundary."""
+    """Expose counted path names and live fixed-cell values at validation."""
+    import bonds_lite_input as workflow
+
     caller_path, bonds, map_data, template = local_paths
     values = {
         "D39": bonds.name,
@@ -2138,21 +2615,52 @@ def input_controls(local_paths: tuple[Path, Path, Path, Path]) -> Any:
         "D9": "JRL",
     }
     reads: list[str] = []
+    path_addresses = dict(zip(
+        workflow.STAGE_ONE_PATH_NAMES,
+        ("D39", "D40", "D42"),
+        strict=True,
+    ))
+
+    class NamedPathCell:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.sheet = SimpleNamespace(name="I. Control", book=None)
+            self.size = 1
+            self.api = SimpleNamespace(Areas=SimpleNamespace(Count=1))
+
+        @property
+        def value(self) -> Any:
+            reads.append(self.name)
+            return values[path_addresses[self.name]]
+
+    caller = SimpleNamespace(
+        fullname=str(caller_path),
+        sheets={"I. Control": SimpleNamespace(range=None)},
+        app=object(),
+    )
+    named_path_cells = {
+        name: NamedPathCell(name) for name in workflow.STAGE_ONE_PATH_NAMES
+    }
+    for cell in named_path_cells.values():
+        cell.sheet.book = caller
+    caller.names = {
+        name: SimpleNamespace(refers_to_range=cell)
+        for name, cell in named_path_cells.items()
+    }
 
     def control_range(address: str) -> Any:
         assert address in values, f"Unexpected control read: {address}"
         reads.append(address)
         return SimpleNamespace(value=values[address])
 
-    caller = SimpleNamespace(
-        fullname=str(caller_path),
-        sheets={"I. Control": SimpleNamespace(range=control_range)},
-        app=object(),
+    caller.sheets["I. Control"].range = control_range
+    return SimpleNamespace(
+        caller=caller, values=values, reads=reads, paths=local_paths,
+        path_addresses=path_addresses,
     )
-    return SimpleNamespace(caller=caller, values=values, reads=reads, paths=local_paths)
 
 
-def test_validate_inputs_captures_frozen_snapshot_once_from_d39_d40_d42(
+def test_validate_inputs_captures_frozen_snapshot_from_named_path_controls(
     input_controls: Any,
     stress_values: dict,
     monkeypatch: pytest.MonkeyPatch,
@@ -2210,7 +2718,9 @@ def test_validate_inputs_captures_frozen_snapshot_once_from_d39_d40_d42(
     ) == state.paths
     assert settings.valuation_date == state.values["D11"]
     assert settings.entity == "JRL" and settings.stresses == stress_values
-    assert sorted(state.reads) == sorted(["D39", "D40", "D42", "D11", "D9"])
+    assert sorted(state.reads) == sorted([
+        *workflow.STAGE_ONE_PATH_NAMES, "D11", "D9",
+    ])
     assert stress_reads == [state.caller]
     assert sorted(block_reads) == sorted([*workflow.STRESS_BLOCKS, *header_values])
     captured_stresses = deepcopy(settings.stresses)
@@ -2222,6 +2732,34 @@ def test_validate_inputs_captures_frozen_snapshot_once_from_d39_d40_d42(
         settings.entity = "Changed"
 
 
+def test_validate_inputs_follows_path_controls_after_they_move(
+    input_controls: Any,
+    stress_values: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bonds_lite_input as workflow
+
+    state = input_controls
+    moved = {
+        name: address
+        for name, address in zip(
+            workflow.STAGE_ONE_PATH_NAMES,
+            ("M203", "M204", "M206"),
+            strict=True,
+        )
+    }
+    for name, address in moved.items():
+        state.values[address] = state.values[state.path_addresses[name]]
+        state.path_addresses[name] = address
+    state.values.update(D11=datetime(2026, 9, 30), D9="JRL")
+    monkeypatch.setattr(workflow, "read_credit_stresses", lambda caller: stress_values)
+
+    settings = workflow.validate_inputs(state.caller)
+
+    assert (settings.bonds_path, settings.map_path, settings.template_path) == state.paths[1:]
+    assert all(address not in state.reads for address in ("D39", "D40", "D42"))
+
+
 @pytest.mark.parametrize("address", ["D39", "D40", "D42"])
 def test_validate_inputs_missing_required_control_creates_no_outputs(
     input_controls: Any,
@@ -2231,7 +2769,10 @@ def test_validate_inputs_missing_required_control_creates_no_outputs(
     import bonds_lite_input as workflow
 
     state = input_controls
-    state.values[address] = ""
+    name = dict(zip(
+        ("D39", "D40", "D42"), workflow.STAGE_ONE_PATH_NAMES, strict=True,
+    ))[address]
+    state.values[state.path_addresses[name]] = ""
     state.values["D41"] = str(state.paths[3])
     before = {path: path.read_bytes() for path in state.paths}
     monkeypatch.setattr(workflow, "read_credit_stresses", lambda caller: {})
@@ -2272,16 +2813,50 @@ def test_validate_inputs_rejects_invalid_snapshot_controls(
     assert not (input_controls.paths[0].parent / "Bonds Lite output").exists()
 
 
+@pytest.mark.parametrize(
+    ("date_changed", "entity_changed", "written_addresses"),
+    [
+        pytest.param(False, False, (), id="unchanged"),
+        pytest.param(True, False, ("D10",), id="date-changed"),
+        pytest.param(False, True, ("D13",), id="entity-changed"),
+        pytest.param(True, True, ("D10", "D13"), id="both-changed"),
+    ],
+)
 def test_synchronise_controls_uses_snapshot_and_preserves_other_controls(
     local_paths: tuple[Path, Path, Path, Path],
     stress_values: dict,
+    date_changed: bool,
+    entity_changed: bool,
+    written_addresses: tuple[str, ...],
 ) -> None:
     from bonds_lite_input import StageOneInputs, synchronise_controls
 
+    class TrackingCell:
+        """Record assignments without counting the initial cell value."""
+
+        def __init__(self, value: Any) -> None:
+            self._value = value
+            self.assignments: list[Any] = []
+
+        @property
+        def value(self) -> Any:
+            return self._value
+
+        @value.setter
+        def value(self, value: Any) -> None:
+            self.assignments.append(value)
+            self._value = value
+
     settings = StageOneInputs(*local_paths, datetime(2026, 9, 30), "JRL", stress_values)
     cells = {
-        address: SimpleNamespace(value=f"Original {address}")
-        for address in ("D10", "D13", "D19", "D11", "D9")
+        "D10": TrackingCell(
+            datetime(2026, 6, 30) if date_changed else settings.valuation_date
+        ),
+        "D13": TrackingCell("JPL" if entity_changed else settings.entity),
+        **{
+            address: TrackingCell(f"Original {address}")
+            for address in ("D19", "D11", "D9")
+        },
     }
     working = SimpleNamespace(
         sheets={"I. Control": SimpleNamespace(range=cells.__getitem__)}
@@ -2291,6 +2866,11 @@ def test_synchronise_controls_uses_snapshot_and_preserves_other_controls(
     assert cells["D13"].value == settings.entity
     for address in ("D19", "D11", "D9"):
         assert cells[address].value == f"Original {address}"
+    expected_values = {"D10": settings.valuation_date, "D13": settings.entity}
+    assert {address: cell.assignments for address, cell in cells.items()} == {
+        address: [expected_values[address]] if address in written_addresses else []
+        for address in cells
+    }
 
 
 @pytest.mark.parametrize(
@@ -2584,6 +3164,59 @@ def test_paired_cleanup_failure_preserves_generation_error_and_blocks_complete_p
         workflow.portable_output_path(local_paths[0], run)
 
 
+@pytest.mark.parametrize("calculation", [-4105, -4135], ids=["auto", "manual"])
+@pytest.mark.parametrize("fail_inside", [False, True], ids=["normal", "error"])
+def test_excel_state_preserves_calculation_without_assignment(
+    calculation: int, fail_inside: bool,
+) -> None:
+    import bonds_lite_input as workflow
+
+    originals = {
+        "AutomationSecurity": 1,
+        "EnableEvents": True,
+        "DisplayAlerts": True,
+        "ScreenUpdating": True,
+        "CalculateBeforeSave": True,
+        "Calculation": calculation,
+    }
+    assignments: list[tuple[str, Any]] = []
+
+    class TrackedSettings(SimpleNamespace):
+        def __setattr__(self, name: str, value: Any) -> None:
+            assignments.append((name, value))
+            super().__setattr__(name, value)
+
+    application = SimpleNamespace(api=TrackedSettings(**originals))
+    assignments.clear()
+    observed: dict[str, Any] = {}
+    error = RuntimeError("State context sentinel")
+
+    def exercise() -> None:
+        with workflow.excel_state(application):
+            observed.update(vars(application.api))
+            if fail_inside:
+                raise error
+
+    if fail_inside:
+        with pytest.raises(RuntimeError) as caught:
+            exercise()
+        assert caught.value is error
+    else:
+        exercise()
+
+    assert vars(application.api) == originals
+    assert {name: value for name, value in observed.items() if name != "Calculation"} == {
+        "AutomationSecurity": 3,
+        "EnableEvents": False,
+        "DisplayAlerts": False,
+        "ScreenUpdating": False,
+        "CalculateBeforeSave": False,
+    }
+    assert not [entry for entry in assignments if entry[0] == "Calculation"]
+    assert observed["Calculation"] == calculation
+
+
+@pytest.mark.parametrize("calculation", [-4105, -4135], ids=["auto", "manual"])
 @pytest.mark.parametrize("dataset", ["Bonds", "MAP"])
 @pytest.mark.parametrize(
     "failure",
@@ -2603,6 +3236,7 @@ def test_generate_dataset_input_owns_only_source_and_unique_private_copy(
     monkeypatch: pytest.MonkeyPatch,
     dataset: str,
     failure: str | None,
+    calculation: int,
 ) -> None:
     import bonds_lite_input as workflow
 
@@ -2615,7 +3249,8 @@ def test_generate_dataset_input_owns_only_source_and_unique_private_copy(
         (run / f"JRL {label}").mkdir()
     source_path = settings.bonds_path if dataset == "Bonds" else settings.map_path
     originals = {path: path.read_bytes() for path in local_paths}
-    application = object()
+    application = SimpleNamespace(api=SimpleNamespace(Calculation=calculation))
+    manual_active = False
     source = object()
     working = SimpleNamespace(api=SimpleNamespace(Saved=True))
     opened: list[tuple[Path, bool]] = []
@@ -2628,8 +3263,27 @@ def test_generate_dataset_input_owns_only_source_and_unique_private_copy(
     )
 
     @contextmanager
+    def properties(*, calculation: str) -> Iterator[None]:
+        nonlocal manual_active
+        assert calculation == "manual"
+        assert not manual_active and events[-1] == "open_copy"
+        original_calculation = application.api.Calculation
+        application.api.Calculation = -4135
+        manual_active = True
+        events.append("enter_manual")
+        try:
+            yield
+        finally:
+            application.api.Calculation = original_calculation
+            manual_active = False
+            events.append("restore_calculation")
+
+    application.properties = properties
+
+    @contextmanager
     def owned_book(app: Any, path: Path, read_only: bool = True) -> Iterator[Any]:
         assert app is application
+        assert not manual_active and application.api.Calculation == calculation
         opened.append((path, read_only))
         if read_only:
             assert path != source_path
@@ -2648,28 +3302,35 @@ def test_generate_dataset_input_owns_only_source_and_unique_private_copy(
         try:
             yield book
         finally:
+            assert not manual_active and application.api.Calculation == calculation
             events.append("close_source" if read_only else "close_copy")
 
     def populate(data: Any, book: Any) -> tuple[int, list[int]]:
         assert data is source and book is working
+        assert manual_active, "Data import must run inside the manual calculation context"
+        assert application.api.Calculation == -4135
         events.append("populate")
         return (1 if dataset == "Bonds" else 2), [10, 11, 1217]
 
     def stress(*args: Any, **kwargs: Any) -> None:
         assert any(value is settings.stresses or value is settings for value in args)
+        assert manual_active and application.api.Calculation == -4135
         events.append("stress")
 
     def controls(snapshot: Any, book: Any) -> None:
         assert snapshot is settings and book is working
+        assert manual_active and application.api.Calculation == -4135
         events.append("controls")
 
     def output_folder(book: Any, folder: Path) -> None:
         assert book is working and folder == run / f"JRL {dataset}"
+        assert manual_active and application.api.Calculation == -4135
         events.append("output_folder")
 
     def refresh(book: Any, columns: list[int]) -> None:
         assert book is working and columns == [10, 11, 1217]
         assert "output_folder" in events and "controls" in events
+        assert not manual_active and application.api.Calculation == calculation
         events.append("refresh")
         if failure in ("refresh", "interrupt"):
             raise error
@@ -2736,6 +3397,11 @@ def test_generate_dataset_input_owns_only_source_and_unique_private_copy(
         and opened[1][1] is False
     )
     assert len(source_copies) == 1 and not source_copies[0].exists()
+    assert events[:9] == [
+        "open_source", "open_copy", "enter_manual", "populate", "stress",
+        "controls", "output_folder", "restore_calculation", "refresh",
+    ]
+    assert not manual_active and application.api.Calculation == calculation
     assert events.index("close_copy") < events.index("close_source")
     assert set(run.iterdir()) == {
         run / "JRL Bonds",
@@ -5391,6 +6057,134 @@ def test_model_results_transaction_restores_old_pair_or_commits_only_on_clean_ex
     assert set(state.folder.parent.iterdir()) == parent_before
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows read-only deletion semantics")
+@pytest.mark.parametrize("old_files", [False, True], ids=["empty_dirs", "dirs_and_files"])
+def test_model_results_transaction_readonly_backup_commit_preserves_new_results(
+    stage_two_results_case: Any, caplog: pytest.LogCaptureFixture,
+    old_files: bool,
+) -> None:
+    """Remove disposable read-only backups without warning or changing new results."""
+    import bonds_lite_input as workflow
+
+    state = stage_two_results_case
+    if old_files:
+        for item in state.inputs.values():
+            (item.output_folder / "old.csv").write_bytes(b"Old result sentinel")
+        _write_stage_two_summary(state.folder, _stage_two_summary_rows(state.inputs))
+    parent_before = set(state.folder.parent.iterdir())
+    readonly_paths = []
+    try:
+        with caplog.at_level(logging.WARNING, logger=workflow.logger.name):
+            with workflow.model_results_transaction(state.folder, state.inputs) as transaction:
+                backups = set(state.folder.parent.iterdir()) - parent_before
+                assert len(backups) == 1
+                backup = backups.pop()
+                readonly_paths = list(backup.rglob("*"))
+                assert {"Bonds", "MAP", "summaries"} <= {
+                    path.name for path in readonly_paths if path.is_dir()
+                }
+                for path in readonly_paths:
+                    path.chmod(path.stat().st_mode & ~stat.S_IWRITE)
+                    assert not path.stat().st_mode & stat.S_IWRITE
+                _write_stage_two_artifacts(state.inputs)
+                _write_stage_two_summary(
+                    state.folder, _stage_two_summary_rows(state.inputs),
+                )
+                expected_results = _stage_two_tree(state.folder)
+                transaction.commit()
+        assert _stage_two_tree(state.folder) == expected_results
+        assert not [
+            record for record in caplog.records
+            if record.name == workflow.logger.name and record.levelno >= logging.WARNING
+        ]
+        assert set(state.folder.parent.iterdir()) == parent_before
+    finally:
+        for path in readonly_paths:
+            if path.exists():
+                path.chmod(path.stat().st_mode | stat.S_IWRITE)
+
+
+@pytest.mark.parametrize("function_name", ["unlink", "remove", "rmdir"])
+@pytest.mark.parametrize("retry_fails", [False, True], ids=["removed", "retry_denied"])
+def test_retry_readonly_backup_removal_retries_deletion_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    function_name: str, retry_fails: bool,
+) -> None:
+    """Clear only the read-only bit and never loop after a failed retry."""
+    import bonds_lite_input as workflow
+
+    path = tmp_path / "readonly_backup"
+    if function_name == "rmdir":
+        path.mkdir()
+    else:
+        path.write_bytes(b"Disposable old result")
+    path.chmod(path.stat().st_mode & ~stat.S_IWRITE)
+    mode = path.stat().st_mode
+    original_function = getattr(os, function_name)
+    retry_error = PermissionError("Retry denied sentinel")
+    callback = Mock(side_effect=retry_error if retry_fails else original_function)
+    original_chmod = Path.chmod
+    chmod_calls = []
+
+    def chmod(target: Path, requested_mode: int) -> None:
+        chmod_calls.append((target, requested_mode))
+        original_chmod(target, requested_mode)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(workflow.os, function_name, callback)
+            patch.setattr(Path, "chmod", chmod)
+            error = PermissionError("Read-only deletion sentinel")
+            if retry_fails:
+                with pytest.raises(PermissionError) as caught:
+                    workflow._retry_readonly_backup_removal(callback, str(path), error)
+                assert caught.value is retry_error
+            else:
+                workflow._retry_readonly_backup_removal(callback, str(path), error)
+                assert not path.exists()
+            callback.assert_called_once_with(str(path))
+            assert chmod_calls == [(path, mode | stat.S_IWRITE)]
+    finally:
+        if path.exists():
+            path.chmod(path.stat().st_mode | stat.S_IWRITE)
+
+
+@pytest.mark.parametrize("scenario", ["writable", "unexpected_function", "nonpermission"])
+def test_retry_readonly_backup_removal_rejects_unsafe_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str,
+) -> None:
+    """Propagate unrelated failures without changing permissions or invoking callbacks."""
+    import bonds_lite_input as workflow
+
+    path = tmp_path / "readonly_backup"
+    path.write_bytes(b"Disposable old result")
+    if scenario == "writable":
+        path.chmod(path.stat().st_mode | stat.S_IWRITE)
+    else:
+        path.chmod(path.stat().st_mode & ~stat.S_IWRITE)
+    original_mode = path.stat().st_mode
+    error = (
+        OSError("Non-permission sentinel") if scenario == "nonpermission"
+        else PermissionError("Permission denied sentinel")
+    )
+    callback = Mock()
+    chmod = Mock(side_effect=AssertionError("Must not change permissions"))
+    try:
+        with monkeypatch.context() as patch:
+            if scenario != "unexpected_function":
+                patch.setattr(workflow.os, "unlink", callback)
+            patch.setattr(Path, "chmod", chmod)
+            with pytest.raises(type(error)) as caught:
+                workflow._retry_readonly_backup_removal(callback, str(path), error)
+            assert caught.value is error
+            callback.assert_not_called()
+            chmod.assert_not_called()
+            assert path.stat().st_mode == original_mode
+            assert path.read_bytes() == b"Disposable old result"
+    finally:
+        path.chmod(path.stat().st_mode | stat.S_IWRITE)
+
+
 def test_model_results_transaction_rollback_failure_retains_recoverable_backup(
     stage_two_results_case: Any, monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str],
@@ -6293,6 +7087,75 @@ def test_preflight_model_environment_uses_bounded_separate_import_probe_not_mode
     with pytest.raises(BondsLiteError, match=r"(?i)dependency|environment|import|preflight"):
         workflow.preflight_model_environment(config)
     assert len(probes) == 1
+
+
+def test_packaged_model_command_uses_cached_executable_and_only_run_folder(
+    tmp_path: Path,
+) -> None:
+    import bonds_lite_input as workflow
+
+    model = tmp_path / "Bonds Lite App" / "Model" / "BondsLiteModel.exe"
+    run_folder = tmp_path / "Bonds Lite output" / "20261030_120000"
+    config = workflow.ModelConfig(model, model.parent, packaged=True)
+
+    assert workflow._model_batch_command(config, run_folder) == [str(model), str(run_folder)]
+
+
+def test_packaged_model_environment_does_not_depend_on_python_env_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bonds_lite_input as workflow
+
+    monkeypatch.setenv("BONDS_LITE_MODEL_PYTHON", "must-not-be-used.exe")
+    monkeypatch.setenv("BONDS_LITE_MODEL_DIR", "must-not-be-used")
+    monkeypatch.setenv("PYTHONHOME", "must-not-be-used")
+    monkeypatch.setenv("PYTHONPATH", "must-not-be-used")
+    config = workflow.ModelConfig(
+        tmp_path / "BondsLiteModel.exe", tmp_path, packaged=True,
+    )
+
+    environment = workflow._model_environment(config)
+
+    assert "BONDS_LITE_MODEL_PYTHON" not in environment
+    assert "BONDS_LITE_MODEL_DIR" not in environment
+    assert "PYTHONHOME" not in environment
+    assert "PYTHONPATH" not in environment
+
+
+def test_packaged_model_entry_preflight_imports_runtime_without_batch(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    import bonds_lite_model_entry as entry
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("Runtime preflight must not run a model batch or numerical work")
+
+    for module_name in ("dateutil", "numpy", "pandas", "scipy", "xlwings"):
+        monkeypatch.setitem(sys.modules, module_name, SimpleNamespace(__version__="fixture"))
+    monkeypatch.setitem(sys.modules, "pyBondsHMutils", SimpleNamespace(numba=None))
+    monkeypatch.setitem(sys.modules, "BondsModelHandler", SimpleNamespace(BondsModelHandler=forbidden))
+    monkeypatch.setitem(sys.modules, "run_bonds_batch", SimpleNamespace(run_batch=forbidden))
+
+    assert entry.main(["--preflight"]) == 0
+    output = capsys.readouterr().out
+    assert "MODEL_PREFLIGHT_OK" in output
+    assert "Loading" in output
+
+
+def test_controller_entry_prints_before_workflow_import(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    import runpy
+
+    project = Path(__file__).resolve().parents[1]
+    monkeypatch.setitem(sys.modules, "bonds_lite_input", SimpleNamespace(main=lambda: 0))
+    monkeypatch.setattr(sys, "argv", ["controller_entry"])
+
+    with pytest.raises(SystemExit) as caught:
+        runpy.run_path(str(project / "tools" / "controller_entry.py"), run_name="__main__")
+
+    assert caught.value.code == 0
+    assert capsys.readouterr().out.startswith("Starting Bonds Lite controller")
 
 
 def test_read_model_inputs_follows_moved_names_instead_of_cell_addresses(
