@@ -1,12 +1,12 @@
 # Bonds Lite Input Setup And Use
 
-Version 0.9 | 30 October 2026 | Local-cache deployment in progress
+Version 1.1 | 2 November 2026 | Local-cache v4 active; named path controls installed
 
 ## Overview
 
 Generate Bonds Lite Input on the Draft workbook's I. Control sheet starts the workflow through a small VBA launcher. Stage 1 prepares two validated inputs, Bonds and MAP, using one template and one captured set of date/entity/stresses. Both must succeed before the run folder becomes eligible for Stage 2. Stage 2 runs the unchanged folder-based Bonds Lite batch against that exact pair.
 
-The planned colleague deployment uses frozen controller/model executables cached under the current Windows user's LocalAppData. Draft stays in the user's locally synced SharePoint/OneDrive folder; the launcher resolves that user's local Draft path and attaches to the exact open Excel instance. The central release share is checked once at the first button click in each Excel session. Later clicks use the local cache without network access. This deployment is not yet built or installed; until rollout is accepted, use the maintainer source-mode setup below.
+The colleague deployment uses frozen controller/model executables cached under the current Windows user's LocalAppData. Draft stays in the user's locally synced SharePoint/OneDrive folder; the launcher resolves that user's local Draft path and attaches to the exact open Excel instance. The central release share is checked once at the first button click in each Excel session. Later clicks use the local cache without network access. Release v4 is active and Stage 1 reads its three path controls through workbook names.
 
 ## Prerequisites
 
@@ -37,9 +37,10 @@ existing scenario inputs, templates and output paths as configured; those data
 paths are separate from the application cache. Do not copy application files
 between releases or delete LocalAppData cache folders while a run is active.
 
-**Deployment status:** the source implementation is in progress. No new package
-has been built, promoted or installed into the production Draft yet. Use the
-maintainer source-mode instructions below until the maintainer confirms rollout.
+**Deployment status:** release `20261102-cache-v4` is active in both the central
+pointer and this user's LocalAppData cache. The backed-up Draft has the three
+Stage 1 path names installed. No path-control movement is required; moving a
+control is optional.
 
 ### Maintainers: Source Mode
 
@@ -66,7 +67,7 @@ The supplied Draft workbook already has the button and audit panel installed. If
 
 Installation requires Excel to allow programmatic access to the VBA project under your organisation's policy. If access is blocked, ask your authorised administrator or workbook maintainer; the installer does not change security policy. Original Draft copies are retained under references/backups before installation changes.
 
-The Stage 1 panel was initially installed at I. Control!H73:O83. Stage 2 adds its own named panel below the current Stage 1 panel and controls. Installation checks occupied cells, merges and shape overlap and preserves the existing Stage 1 button geometry on reinstall. Keep Draft saved and closed; a timestamped backup is made before installation.
+The Stage 1 panel was initially installed at I. Control!H73:O83. Stage 2 adds its own named panel below the current Stage 1 panel and controls. Installation checks occupied cells, merges and shape overlap and preserves the existing Stage 1 button geometry on reinstall. The installer creates the Stage 1 path names on legacy Drafts only after validating all three adjacent labels. Keep Draft saved and closed; a timestamped backup is made before installation.
 
 ## Configuration
 
@@ -78,15 +79,15 @@ The packaged colleague runtime does not read them.
 | BONDS_LITE_PYTHON | Per-user environment variable | Absolute python.exe path; required, no built-in default |
 | BONDS_LITE_MODEL_PYTHON | Per-user environment variable | Separate model environment's Python 3.11 python.exe; required for Stage 2 |
 | BONDS_LITE_MODEL_DIR | Per-user environment variable | Optional model project folder containing run_bonds_batch.py |
-| Draft I. Control!D39 | Text | Data workbook path; installer fills the supplied data filename only when blank |
-| Draft I. Control!D40 | Text | Required MAP data workbook path; deliberately left blank by the installer if blank |
-| Draft I. Control!D42 | Text | Shared input template path for both datasets; installer supplies its default only when blank |
+| Stage 1 Bonds path | Workbook name `SST_Stage1_BondsDataPath` (initial cell D39) | Data workbook path; installer fills the supplied data filename only when blank |
+| Stage 1 MAP path | Workbook name `SST_Stage1_MAPDataPath` (initial cell D40) | Required MAP data workbook path; deliberately left blank by the installer if blank |
+| Stage 1 template path | Workbook name `SST_Stage1_InputTemplatePath` (initial cell D42) | Shared input template path for both datasets; installer supplies its default only when blank |
 | Draft I. Control!D11 | Excel date | Valuation date copied to output I. Control!D10 |
 | Draft I. Control!D9 | Text | Entity copied to output I. Control!D13 |
 | Draft I. Credit Stresses | Numeric cells | All 12 blocks required; decimals, copied without scaling |
 | Output location | Derived, not an input cell | Bonds Lite output under the saved Draft workbook's folder |
 
-Paths may be absolute or filenames relative to Draft. Use the locally synchronised OneDrive path, not an HTTPS link. Draft, Bonds data, MAP data and the shared template must all be distinct files. D41 is no longer the template-path control after the inserted MAP row; its contents are not used by Stage 1.
+Paths may be absolute or filenames relative to Draft. Use the locally synchronised OneDrive path, not an HTTPS link. Draft, Bonds data, MAP data and the shared template must all be distinct files. D41 is unused. On first installation or migration, the installer checks the labels beside D39, D40 and D42 and creates the three workbook names there. After migration, move a path cell with Excel Cut/Paste so its defined name follows it; copying a cell does not move the named control. Do not delete or rename these names. Partial/missing names or labels that do not match the legacy layout are rejected instead of guessed.
 
 Each data source must contain I. Bonds Data and its I_tbl_Monthly_Bonds table, beginning at B8 and ending in column ATT: 1,215 columns. Its headers must match the destination's B:ATT prefix in order. The input template retains its calculated tail through AUN. Bonds and MAP row counts may differ; missing, reordered or additional raw columns are rejected. The old full-width AUN data-source format is no longer accepted.
 
@@ -95,7 +96,7 @@ The supplied source was rescanned as B8:ATT1066, or 1,058 bond rows; the supplie
 ## Use
 
 1. Save Draft in its local or locally synced OneDrive folder and open it in desktop Excel. Do not open it in a browser.
-2. Set D39 to Bonds data, D40 to MAP data and D42 to the shared template. Close those files and required external dependency workbooks in this Excel instance before running. Dependencies must contain the saved data you intend to use. A blank D40 blocks generation; no MAP filename is assumed.
+2. Set the named Bonds, MAP and shared-template path cells. They may be moved with Cut/Paste after names are installed. Close the files and required external dependency workbooks in this Excel instance before running. Dependencies must contain the saved data you intend to use. A blank MAP path blocks generation; no MAP filename is assumed.
 3. Confirm date/entity and populate every required numeric stress cell. Genuine zero is valid; a blank is not zero.
 4. On I. Credit Stresses, use C:J, M:DI and DL:HH for each row group 9:15, 20:26, 31:37 and 42:48. These are the four transition matrices and the two spread grids per currency/sector.
 5. Click Generate Bonds Lite Input on I. Control near row 73. Keep Draft open while the asynchronous Python process runs. Do not edit the inputs during a run.

@@ -1,6 +1,6 @@
 # Plan: Portable Bonds Lite Runtime
 
-30 October 2026 | Release published and Draft launcher installed; no financial batch run
+2 November 2026 | Release v4 published; named Stage 1 path controls installed in Draft
 
 ## Overview
 
@@ -300,7 +300,8 @@ size promise; capture the size of any approved final build.
   completed in 2.11 seconds and validated all 1,201 SONIA rows; it did not run
   Stage 1/2 or a financial batch. The user also confirmed that forced native
   Ctrl+Alt+F9 remains busy and selected normal F9 semantics instead.
-- The user approved one replacement build and verified rollout for this fix.
+- The user approved a v4 replacement build and verified rollout for the named
+  Stage 1 path controls.
   Release `20261030-cache-v2` was built and verified: 984 files, 332,230,035
   bytes, matching executable hashes, unchanged model sources and all four
   corrected embedded controller functions matching the tested source. Model
@@ -335,3 +336,12 @@ size promise; capture the size of any approved final build.
 - No REM edits, security-policy changes or agent-run real financial batch were
   performed. The user's successful run is not an independent financial-result
   validation; target-user security-warning acceptance remains a separate gate.
+- Stage 1's Bonds, MAP and shared-template path controls were changed from fixed
+  runtime cell addresses to the three workbook names in Decision 31. Release
+  `20261102-cache-v4` contains the tested code; the backed-up Draft was migrated
+  by label validation and both release pointers were verified on v4. The
+  original D39/D40/D42 cells and path values were preserved. Users may move a
+  control with Cut/Paste after migration; copying it does not move its name.
+  Focused path tests passed (22); the full non-Excel suite had 664 passed,
+  8 skipped and the same two known failures. No Stage 1/2 run was performed
+  for this change.

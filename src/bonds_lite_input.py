@@ -770,6 +770,22 @@ INPUT_FILENAMES = {
     "Bonds": "Bonds Lite input_Bonds.xlsx",
     "MAP": "Bonds Lite input_MAP.xlsx",
 }
+STAGE_ONE_PATH_NAMES = (
+    "SST_Stage1_BondsDataPath",
+    "SST_Stage1_MAPDataPath",
+    "SST_Stage1_InputTemplatePath",
+)
+STAGE_ONE_PATH_CONTROLS = {
+    "SST_Stage1_BondsDataPath": (
+        "D39", "C39", "Enter source for bond asset data at valuation date:"
+    ),
+    "SST_Stage1_MAPDataPath": (
+        "D40", "C40", "Enter source for MAP bonds asset data at valuation date:"
+    ),
+    "SST_Stage1_InputTemplatePath": (
+        "D42", "C42", "Enter source name for bonds lite:"
+    ),
+}
 
 STAGE_ONE_FIELDS = {
     "last_run": "L74", "start": "L75", "finish": "L76", "elapsed": "L77",
@@ -1912,13 +1928,77 @@ def validate_entity(entity: str) -> str:
     return entity
 
 
+def _stage_one_path_cell(caller: xw.Book, name: str) -> xw.Range:
+    """Resolve one scalar Stage 1 path name owned by this Draft's I. Control."""
+    if name not in STAGE_ONE_PATH_NAMES:
+        raise BondsLiteError(f"Unknown Stage 1 path name: {name}")
+    try:
+        region = caller.names[name].refers_to_range
+        if (
+            region.sheet.name != "I. Control"
+            or os.path.normcase(region.sheet.book.fullname) != os.path.normcase(caller.fullname)
+            or region.api.Areas.Count != 1
+            or region.size != 1
+        ):
+            raise BondsLiteError(
+                f"Stage 1 path name must identify one cell on this workbook's "
+                f"I. Control sheet: {name}"
+            )
+        return region
+    except BondsLiteError:
+        raise
+    except Exception as error:
+        raise BondsLiteError(f"Stage 1 path name is missing or invalid: {name}") from error
+
+
+def initialise_stage_path_names(caller: xw.Book) -> None:
+    """Name the original labelled controls once, then preserve moved names."""
+    existing = {
+        getattr(name, "name", name).split("!")[-1] for name in caller.names
+    }
+    present = existing.intersection(STAGE_ONE_PATH_NAMES)
+    if present:
+        if present != set(STAGE_ONE_PATH_NAMES):
+            raise BondsLiteError(
+                "Stage 1 path names are incomplete; installation was not changed"
+            )
+        for name in STAGE_ONE_PATH_NAMES:
+            _stage_one_path_cell(caller, name)
+        return
+
+    sheet = caller.sheets["I. Control"]
+    for _, label_cell, expected_label in STAGE_ONE_PATH_CONTROLS.values():
+        value = sheet.range(label_cell).value
+        if not isinstance(value, str) or value.strip() != expected_label:
+            raise BondsLiteError(
+                f"Cannot identify the Stage 1 path control beside {label_cell}"
+            )
+
+    added = []
+    try:
+        for name, (path_cell, _, _) in STAGE_ONE_PATH_CONTROLS.items():
+            caller.names.add(
+                name, f"='I. Control'!{sheet.range(path_cell).get_address()}"
+            )
+            added.append(name)
+        for name in STAGE_ONE_PATH_NAMES:
+            _stage_one_path_cell(caller, name)
+    except Exception:
+        for name in added:
+            caller.names[name].delete()
+        raise
+
+
 def validate_inputs(caller: xw.Book) -> StageOneInputs:
     """Validate file controls and live stress inputs before creating working files."""
-    control = caller.sheets["I. Control"]
     paths = resolve_paths(
-        caller.fullname, control.range("D39").value or "",
-        control.range("D40").value or "", control.range("D42").value or "",
+        caller.fullname,
+        *(
+            _stage_one_path_cell(caller, name).value or ""
+            for name in STAGE_ONE_PATH_NAMES
+        ),
     )
+    control = caller.sheets["I. Control"]
     date = control.range("D11").value
     entity = validate_entity(control.range("D9").value)
     if not isinstance(date, datetime):
@@ -2397,6 +2477,7 @@ def install_button(caller: Path, packaged: bool = False) -> Path:
             if book.api.ReadOnly:
                 raise BondsLiteError("Draft workbook is read-only or locked")
             initialise_stage_panel(book)
+            initialise_stage_path_names(book)
             components = book.api.VBProject.VBComponents
             names = [components.Item(index).Name for index in range(1, components.Count + 1)]
             if "modBondsLiteLauncher" in names:
@@ -2424,10 +2505,16 @@ def install_button(caller: Path, packaged: bool = False) -> Path:
                 book, "btnRunBondsLite", "Run Bonds Lite", "RunBondsLite",
                 sheet.range((button_row, 4), (button_row + 2, 6)),
             )
-            if sheet.range("D39").value is None:
-                sheet.range("D39").value = "Bonds Lite data template.xlsx"
-            if sheet.range("D42").value is None:
-                sheet.range("D42").value = "Bonds Lite input template.xlsx"
+            bonds_path = _stage_one_path_cell(
+                book, "SST_Stage1_BondsDataPath"
+            )
+            template_path = _stage_one_path_cell(
+                book, "SST_Stage1_InputTemplatePath"
+            )
+            if bonds_path.value is None:
+                bonds_path.value = "Bonds Lite data template.xlsx"
+            if template_path.value is None:
+                template_path.value = "Bonds Lite input template.xlsx"
             book.save()
         finally:
             components = module = sheet = anchor = button = None

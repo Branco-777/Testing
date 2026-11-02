@@ -50,6 +50,17 @@ EXPECTED_INPUT_FILENAMES = {
     "Bonds": "Bonds Lite input_Bonds.xlsx",
     "MAP": "Bonds Lite input_MAP.xlsx",
 }
+EXPECTED_STAGE_ONE_PATH_CONTROLS = {
+    "SST_Stage1_BondsDataPath": (
+        "D39", "C39", "Enter source for bond asset data at valuation date:"
+    ),
+    "SST_Stage1_MAPDataPath": (
+        "D40", "C40", "Enter source for MAP bonds asset data at valuation date:"
+    ),
+    "SST_Stage1_InputTemplatePath": (
+        "D42", "C42", "Enter source name for bonds lite:"
+    ),
+}
 
 
 def _complete_run(folder: Path) -> Path:
@@ -260,6 +271,65 @@ def test_stage_one_audit_interfaces_exist() -> None:
         portable_output_path, require_stage_panel, resolve_stage_input,
         run_stage_one, write_stage_audit,
     ))
+
+
+@pytest.fixture
+def stage_path_book() -> Any:
+    """Provide local control labels, cells and workbook names without Excel."""
+    cells: dict[str, Any] = {}
+    sheet = SimpleNamespace(name="I. Control", book=None)
+    sheet.api = SimpleNamespace(ProtectContents=False)
+
+    def cell_at(address: str) -> Any:
+        canonical = address.replace("$", "")
+        if canonical not in cells:
+            match = re.fullmatch(r"([A-Z]+)(\d+)", canonical)
+            assert match is not None
+            column_name_value, row_value = match.groups()
+            column_value = 0
+            for character in column_name_value:
+                column_value = column_value * 26 + ord(character) - ord("A") + 1
+            cells[canonical] = SimpleNamespace(
+                value=None,
+                address=f"${column_name_value}${row_value}",
+                row=int(row_value),
+                column=column_value,
+                size=1,
+                api=SimpleNamespace(Areas=SimpleNamespace(Count=1)),
+                sheet=sheet,
+            )
+        return cells[canonical]
+
+    sheet.range = cell_at
+    for _, label_address, label in EXPECTED_STAGE_ONE_PATH_CONTROLS.values():
+        cell_at(label_address).value = label
+
+    class PathNames(dict):
+        def __init__(self) -> None:
+            super().__init__()
+            self.add_calls: list[tuple[str, str]] = []
+
+        def add(self, name: str, refers_to: str) -> Any:
+            self.add_calls.append((name, refers_to))
+            match = re.search(r"!\$?([A-Z]+)\$?(\d+)$", refers_to)
+            assert match is not None
+            cell = cell_at(f"{match.group(1)}{match.group(2)}")
+            named_range = SimpleNamespace(
+                name=name, refers_to=refers_to, refers_to_range=cell
+            )
+            self[name] = named_range
+            return named_range
+
+    names = PathNames()
+    caller = SimpleNamespace(
+        fullname=str(Path("Draft.xlsm").resolve()),
+        api=SimpleNamespace(ReadOnly=False),
+        app=SimpleNamespace(api=SimpleNamespace(EnableEvents=True)),
+        sheets={"I. Control": sheet},
+        names=names,
+    )
+    sheet.book = caller
+    return SimpleNamespace(book=caller, sheet=sheet, names=names, cells=cells)
 
 
 @pytest.fixture
@@ -1509,7 +1579,13 @@ def test_install_button_selects_packaged_launcher_or_source_fallback(
         SimpleNamespace(App=lambda **kwargs: application, apps=[]),
     )
     monkeypatch.setattr(workflow, "initialise_stage_panel", lambda target: None)
+    monkeypatch.setattr(workflow, "initialise_stage_path_names", lambda target: None)
     monkeypatch.setattr(workflow, "initialise_stage_two_panel", lambda target: None)
+    monkeypatch.setattr(
+        workflow,
+        "_stage_one_path_cell",
+        lambda target, name: SimpleNamespace(value="Existing path"),
+    )
     monkeypatch.setattr(workflow, "_install_stage_button", lambda *args: None)
 
     options = {"packaged": True} if packaged else {}
@@ -2658,6 +2734,116 @@ def input_controls(local_paths: tuple[Path, Path, Path, Path]) -> Any:
         caller=caller, values=values, reads=reads, paths=local_paths,
         path_addresses=path_addresses,
     )
+
+
+def test_initialise_stage_path_names_rejects_wrong_label_without_partial_writes(
+    stage_path_book: Any,
+) -> None:
+    import bonds_lite_input as workflow
+
+    state = stage_path_book
+    state.sheet.range("C40").value = "Enter a different source:"
+    with pytest.raises(BondsLiteError):
+        workflow.initialise_stage_path_names(state.book)
+    assert state.names == {}
+    assert state.names.add_calls == []
+
+
+def test_initialise_stage_path_names_preserves_moved_references_on_rerun(
+    stage_path_book: Any,
+) -> None:
+    import bonds_lite_input as workflow
+
+    state = stage_path_book
+    moved_addresses = dict(zip(
+        EXPECTED_STAGE_ONE_PATH_CONTROLS,
+        ("M203", "M204", "M206"),
+        strict=True,
+    ))
+    for name, address in moved_addresses.items():
+        region = state.sheet.range(address)
+        state.names[name] = SimpleNamespace(
+            name=name,
+            refers_to_range=region,
+        )
+    before = {
+        name: definition.refers_to_range.address
+        for name, definition in state.names.items()
+    }
+
+    workflow.initialise_stage_path_names(state.book)
+
+    assert state.names.add_calls == []
+    assert {
+        name: definition.refers_to_range.address
+        for name, definition in state.names.items()
+    } == before
+
+
+def test_initialise_stage_path_names_rejects_partial_set_without_writes(
+    stage_path_book: Any,
+) -> None:
+    import bonds_lite_input as workflow
+
+    state = stage_path_book
+    name = next(iter(EXPECTED_STAGE_ONE_PATH_CONTROLS))
+    existing = SimpleNamespace(
+        name=name,
+        refers_to_range=state.sheet.range("M203"),
+    )
+    state.names[name] = existing
+
+    with pytest.raises(BondsLiteError):
+        workflow.initialise_stage_path_names(state.book)
+
+    assert state.names == {name: existing}
+    assert state.names.add_calls == []
+
+
+@pytest.mark.parametrize("name", tuple(EXPECTED_STAGE_ONE_PATH_CONTROLS))
+@pytest.mark.parametrize(
+    "defect", ["multiple_cells", "multiple_areas", "other_sheet", "foreign_book"]
+)
+def test_validate_inputs_rejects_invalid_named_path_ownership(
+    stage_path_book: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    defect: str,
+) -> None:
+    import bonds_lite_input as workflow
+
+    state = stage_path_book
+    for path_name, (address, _, _) in EXPECTED_STAGE_ONE_PATH_CONTROLS.items():
+        state.names[path_name] = SimpleNamespace(
+            name=path_name,
+            refers_to_range=state.sheet.range(address),
+        )
+    state.sheet.range("D39").value = "Bonds.xlsx"
+    state.sheet.range("D40").value = "MAP.xlsx"
+    state.sheet.range("D42").value = "Template.xlsx"
+    state.sheet.range("D11").value = datetime(2026, 9, 30)
+    state.sheet.range("D9").value = "JRL"
+    region = state.names[name].refers_to_range
+    if defect == "multiple_cells":
+        region.size = 2
+    elif defect == "multiple_areas":
+        region.api.Areas.Count = 2
+    elif defect == "other_sheet":
+        region.sheet = SimpleNamespace(name="Other", book=state.book)
+    else:
+        foreign_book = SimpleNamespace(fullname=str(Path("Other.xlsm").resolve()))
+        region.sheet = SimpleNamespace(name="I. Control", book=foreign_book)
+    monkeypatch.setattr(
+        workflow,
+        "resolve_paths",
+        lambda *args: tuple(Path(value) for value in (
+            "Draft.xlsm", "Bonds.xlsx", "MAP.xlsx", "Template.xlsx",
+        )),
+    )
+    monkeypatch.setattr(workflow, "read_credit_stresses", lambda caller: {})
+
+    with pytest.raises(BondsLiteError):
+        workflow.validate_inputs(state.book)
 
 
 def test_validate_inputs_captures_frozen_snapshot_from_named_path_controls(
@@ -5374,10 +5560,21 @@ def test_install_button_preserves_backup_and_saves_launcher(
             sheet = book.sheets["I. Control"]
             assert sheet.range("D41").value in (None, "")
             if controls == "defaults":
+                assert sheet.range("D39").value == "Bonds Lite data template.xlsx"
                 assert sheet.range("D40").value in (None, "")
                 assert sheet.range("D42").value == "Bonds Lite input template.xlsx"
             else:
                 assert {address: sheet.range(address).value for address in entered} == entered
+            for name, (address, _, _) in EXPECTED_STAGE_ONE_PATH_CONTROLS.items():
+                named_range = book.names[name].refers_to_range
+                control_range = sheet.range(address)
+                assert named_range.sheet.name == "I. Control"
+                assert os.path.normcase(named_range.sheet.book.fullname) == os.path.normcase(
+                    book.fullname
+                )
+                assert named_range.row == control_range.row
+                assert named_range.column == control_range.column
+                assert named_range.size == 1
             assert {name: book.names[name].refers_to for name in panel_names} == panel_names
             assert book.names["SST_Stage1_Panel"].refers_to_range.formula == panel_values
             module = book.api.VBProject.VBComponents.Item(

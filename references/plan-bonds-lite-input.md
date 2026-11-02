@@ -555,4 +555,24 @@ Bonds Lite output/
 
 ## Next Stage: Bonds Lite Batch Execution
 
-Stage 2's user-confirmed implementation plan is saved in references/plan-stage-two.md. It uses the committed Stage 1 run folder with one external run_bonds_batch.py invocation, a separate py311 interpreter, a Run Bonds Lite button, named audit panel and transactional output recovery. See Decisions 23-25. This is planned, not implemented; no model run was performed during planning.
+Stage 2's implementation and transactional recovery are recorded in references/plan-stage-two.md and Decisions 23-25. It uses the committed Stage 1 run folder with one external run_bonds_batch.py invocation, a separate Python 3.11 runtime, a Run Bonds Lite button, named audit panel and transactional output recovery. Both stages were tested successfully by the user on another machine; the most recent local user run on 2 November 2026 completed Stage 1 and Stage 2.
+
+## Amendment: Movable Stage 1 Path Controls (2 November 2026)
+
+- Supersedes only the fixed-cell path-control implementation above. Stage 1
+	resolves Bonds, MAP and shared-template paths through workbook names
+	`SST_Stage1_BondsDataPath`, `SST_Stage1_MAPDataPath` and
+	`SST_Stage1_InputTemplatePath`.
+- The installer migrates a legacy Draft by validating the labels beside D39,
+	D40 and D42 before creating all three names. It preserves a complete existing
+	named set and rejects partial names, mismatched labels and invalid ownership.
+	Runtime validation never falls back to fixed coordinates.
+- To move a path control, use Excel Cut/Paste so the defined name follows the
+	cell; do not copy it or delete/rename its workbook name.
+- Source changes and tests are in `src/bonds_lite_input.py` and
+	`tests/test_bonds_lite_input.py`. Release `20261102-cache-v4` is active in the
+	central and local caches, and the backed-up Draft has the names installed.
+	Focused named-control tests passed (22); disposable installer Excel tests
+	passed (2). The broader non-Excel suite had 664 passed, 8 skipped and two
+	unrelated known failures: the frozen-main test API mismatch and rollback
+	location capture. No financial stage was run for this amendment.
