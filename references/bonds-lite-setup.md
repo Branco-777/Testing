@@ -37,12 +37,13 @@ existing scenario inputs, templates and output paths as configured; those data
 paths are separate from the application cache. Do not copy application files
 between releases or delete LocalAppData cache folders while a run is active.
 
-**Deployment status:** release `20261103-cache-v6` (Stages 1-3) is active in
-both the central pointer and this user's LocalAppData cache since
-3 November 2026. To roll back, write `20261102-cache-v4` to the central
-`current.txt`; v4 runs Stages 1-2 only. The backed-up Draft has the three
-Stage 1 path names installed. No path-control movement is required; moving a
-control is optional.
+**Deployment status:** release `20261103-cache-v7` (Stages 1-3) is active in
+the central pointer since 3 November 2026. This user's LocalAppData cache
+updates when Excel next checks the pointer on a button click; packaged
+Stage 1-3 testing is pending. To roll back, write `20261103-cache-v6` to the
+central `current.txt`. The backed-up Draft has the three Stage 1 path names
+installed. No path-control movement is required; moving a control is
+optional.
 
 ### Maintainers: Source Mode
 
@@ -109,7 +110,9 @@ The workflow generates two workbooks using all credit blocks, regardless of scen
 
 ## Stage 3 Audit And MACalc Input
 
-Click **Prepare MACalc** on I. Control (around row 100). It runs only when Stage 2 has succeeded on the current Stage 1 handoff. It then writes `MACalc input.xlsb` into that same timestamped run folder.
+Click **Prepare MACalc** on I. Control (around row 100). It runs only when Stage 2 has succeeded on the current Stage 1 handoff. It then writes `MACalc input_<run ID>_<token>.xlsb` into that same timestamped run folder, for example `MACalc input_20261103_161318_3f9c2a7be104d65e.xlsb`. The 16-character token is new on every run, so each name is unique across synced folders. Earlier outputs in the folder are kept, and a rerun simply adds a new file. **Last Successful Output** always names the newest one; Stage 4 reads its input from there and never guesses the name.
+
+While it runs, Stage 3 builds the workbook in `Bonds Lite output\Stage 3 staging\` and removes that folder when it finishes. The run stops before writing anything if the run folder name is not a run ID, or if the output path is longer than 218 characters, the longest path Excel can open (shorten the output folder path).
 
 The blue panel `SST_Stage3_Panel` beside the button records the following:
 - Last Run, Start, Finish, Time and User;
@@ -129,7 +132,7 @@ Every post-ILS row takes A:C (Comp. A %, Comp. B %, Partial CF Flag) from MACE `
 
 The CSV is the single file in `<run folder>\<entity> MAP\` whose name contains `py_bonds_Base_Scenario_nozeros`. If a Bonds Lite model update renames it, change `MAP_BASE_OUTPUT_PATTERN` in `src/sst_stage_three.py`.
 
-The run stops before writing anything, and the previous `MACalc input.xlsb` is kept, when any of the following occurs:
+The run stops before writing anything, and earlier MACalc inputs are left unchanged, when any of the following occurs:
 - no CSV or several matching CSVs are found, or the CSV headers or values are invalid;
 - a CSV or funded ISIN is missing or duplicated in MACE `I. Bonds` (column D) or `Control` (column K), or has an invalid Type, Index Linked?, FSAO, Comp. A %, Comp. B % or Partial CF Flag (all offending ISINs are listed in one message);
 - MACE `Control!C9` differs from the Draft `I_Valuation_Date`;

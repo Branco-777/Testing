@@ -8,11 +8,13 @@ import getpass
 import logging
 import math
 import os
+import re
+import secrets
 import shutil
-import tempfile
+import stat
 import time
 from collections.abc import Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import date, datetime
 from numbers import Real
@@ -33,7 +35,16 @@ MACE_FIRST_DATA_ROW = 10
 MACALC_SHEET = "I. Assets"
 MAP_SHEET = "I. Bonds Data"
 MACE_SHEET = "C. Assets - Funding"
-OUTPUT_FILENAME = "MACalc input.xlsb"
+OUTPUT_STEM = "MACalc input"
+OUTPUT_EXTENSION = ".xlsb"
+# Excel cannot open or save a workbook whose full path exceeds 218 characters.
+MAX_OUTPUT_PATH = 218
+RUN_ID_PATTERN = re.compile(r"\d{8}_\d{6}(?:_\d{3})?")
+TOKEN_PATTERN = re.compile(r"[0-9a-f]{16}")
+MAX_TOKEN_ATTEMPTS = 10
+# Excel rewrites the template's SharePoint links when saving outside the synced
+# folder, so staging stays in the output root but outside every run folder.
+STAGING_FOLDER = "Stage 3 staging"
 ASSETS_TABLE_NAME = "tbl_Assets"
 # Change here if a Bonds Lite model update renames the Stage 2 base-scenario CSV.
 MAP_BASE_OUTPUT_PATTERN = "py_bonds_Base_Scenario_nozeros"
@@ -2138,35 +2149,34 @@ def _message(caller: Any, text: str, warning: bool = False) -> None:
         logger.warning("%s", text)
 
 
-def _confirm_overwrite(caller: Any, output_path: Path) -> bool:
-    if not output_path.exists():
-        return True
-    prompt = f"Replace the existing MACalc input?\n\n{output_path}"
-    if os.name == "nt":
-        owner = int(getattr(caller.app.api, "Hwnd", 0))
-        user = ctypes.WinDLL("user32", use_last_error=True)
-        user.MessageBoxW.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_wchar_p,
-            ctypes.c_wchar_p,
-            ctypes.c_uint,
-        ]
-        user.MessageBoxW.restype = ctypes.c_int
-        return (
-            user.MessageBoxW(owner, prompt, "Bonds Lite - Stage 3", 0x4 | 0x20 | 0x1000)
-            == 6
+def _token() -> str:
+    """Return a fresh 16-character lowercase hexadecimal output token."""
+    return secrets.token_hex(8)
+
+
+def output_filename(run_folder: Path, token: str) -> str:
+    """Return the MACalc input name for a Stage 1 run folder and token."""
+    run_id = run_folder.name
+    if not RUN_ID_PATTERN.fullmatch(run_id):
+        raise StageThreeError(
+            "Stage 1 run folder name is not a run ID (YYYYMMDD_HHMMSS, optionally "
+            f"_NNN): {run_folder}"
         )
-    return input(prompt + "\n[y/N]: ").strip().casefold() in {"y", "yes"}
+    if not TOKEN_PATTERN.fullmatch(token):
+        raise StageThreeError(f"MACalc input token is not 16 hex characters: {token}")
+    return f"{OUTPUT_STEM}_{run_id}_{token}{OUTPUT_EXTENSION}"
 
 
-def _backup_path(output_path: Path) -> Path:
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    return output_path.with_name(
-        f".{output_path.stem}.{stamp}.backup{output_path.suffix}"
-    )
+def new_output_path(run_folder: Path) -> Path:
+    """Return an unused, token-suffixed output path in the run folder."""
+    for _ in range(MAX_TOKEN_ATTEMPTS):
+        path = run_folder / output_filename(run_folder, _token())
+        if not path.exists():
+            return path
+    raise StageThreeError(f"Could not find an unused MACalc input name in {run_folder}")
 
 
-def run_stage_three(caller: Any) -> Path | None:
+def run_stage_three(caller: Any) -> Path:
     """Prepare a verified MACalc workbook and commit it with a matching audit."""
     caller_path = shared.resolve_caller_path(caller)
     with shared.workbook_run_guard(caller_path):
@@ -2174,10 +2184,15 @@ def run_stage_three(caller: Any) -> Path | None:
         current_run = shared.resolve_stage_input(caller)
         input_run = shared.portable_output_path(caller_path, current_run)
         previous = _read_stage_three_fields(caller)["last_output"]
-        output_path = current_run / OUTPUT_FILENAME
-        if not _confirm_overwrite(caller, output_path):
-            logger.info("Stage 3 cancelled; output and audit were not changed")
-            return None
+        output_path = new_output_path(current_run)
+        staging_root = current_run.parent / STAGING_FOLDER
+        staging_folder = staging_root / output_path.stem.rsplit("_", 1)[1]
+        for path in (output_path, staging_folder / output_path.name):
+            if len(str(path.absolute())) > MAX_OUTPUT_PATH:
+                raise StageThreeError(
+                    f"MACalc input path is longer than {MAX_OUTPUT_PATH} characters; "
+                    f"shorten the output folder path:\n{path}"
+                )
 
         started = datetime.now()
         clock = time.perf_counter()
@@ -2194,8 +2209,8 @@ def run_stage_three(caller: Any) -> Path | None:
                 "last_output": previous,
             },
         )
+        staging_created = False
         staged_path: Path | None = None
-        backup: Path | None = None
         published = False
         committed = False
         try:
@@ -2248,12 +2263,9 @@ def run_stage_three(caller: Any) -> Path | None:
                 )
                 logger.warning("%s", warning)
 
-            handle, temporary_name = tempfile.mkstemp(
-                prefix=".MACalc-stage3-", suffix=".xlsb", dir=inputs.run_folder
-            )
-            os.close(handle)
-            staged_path = Path(temporary_name)
-            staged_path.unlink()
+            staging_folder.mkdir(parents=True)
+            staging_created = True
+            staged_path = staging_folder / output_path.name
             cleared_through = write_macalc_output(
                 inputs.template_path,
                 staged_path,
@@ -2274,11 +2286,11 @@ def run_stage_three(caller: Any) -> Path | None:
                 asset_ratings=asset_ratings,
             )
             if output_path.exists():
-                backup = _backup_path(output_path)
-                output_path.replace(backup)
-            staged_path.replace(output_path)
-            staged_path = None
+                raise StageThreeError(f"MACalc input already exists: {output_path}")
+            # From here output_path belongs to this run, so a failure may remove it.
             published = True
+            shutil.move(staged_path, output_path)
+            staged_path = None
             write_stage_three_audit(
                 caller,
                 {
@@ -2292,14 +2304,6 @@ def run_stage_three(caller: Any) -> Path | None:
                 },
             )
             committed = True
-            if backup is not None:
-                try:
-                    backup.unlink()
-                    backup = None
-                except OSError:
-                    logger.warning(
-                        "Verified prior MACalc output backup remains at %s", backup
-                    )
             if zero_funded:
                 _message(caller, warning, warning=True)
             if map_warning:
@@ -2311,12 +2315,9 @@ def run_stage_three(caller: Any) -> Path | None:
             )
             return output_path
         except BaseException as error:
-            # Only remove an output this run published; never the previous one.
+            # Only remove an output this run published; earlier ones are never touched.
             if published and not committed and output_path.exists():
                 output_path.unlink()
-            if backup is not None and backup.exists():
-                backup.replace(output_path)
-                backup = None
             status = "Interrupted" if isinstance(error, KeyboardInterrupt) else "Failed"
             try:
                 write_stage_three_audit(
@@ -2340,6 +2341,38 @@ def run_stage_three(caller: Any) -> Path | None:
         finally:
             if staged_path is not None and staged_path.exists():
                 staged_path.unlink()
+            if staging_created:
+                _remove_staging(staging_folder, staging_root)
+
+
+def _clear_read_only_and_retry(
+    function: Any, path: str, error: BaseException
+) -> None:
+    """Retry a removal that failed only because OneDrive marked the path read-only."""
+    mode = os.stat(path).st_mode
+    if not isinstance(error, PermissionError) or mode & stat.S_IWRITE:
+        raise error
+    os.chmod(path, mode | stat.S_IWRITE)
+    function(path)
+
+
+def _remove_staging(staging_folder: Path, staging_root: Path) -> None:
+    """Remove this run's staging folder, and the root once no other run uses it."""
+    try:
+        shutil.rmtree(staging_folder, onexc=_clear_read_only_and_retry)
+    except OSError as error:
+        logger.warning(
+            "Could not remove the Stage 3 staging folder %s: %s", staging_folder, error
+        )
+        return
+    try:
+        staging_root.rmdir()
+    except PermissionError as error:
+        # Another Draft may be staging at the same time; keep the root then.
+        with suppress(OSError):
+            _clear_read_only_and_retry(os.rmdir, str(staging_root), error)
+    except OSError:
+        pass
 
 
 def _install_stage_three_panel(book: Any) -> None:

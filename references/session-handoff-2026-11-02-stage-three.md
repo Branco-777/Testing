@@ -1,38 +1,56 @@
 # Session Handoff: Stage 3 MACalc Input (2 November 2026, updated 3 November 2026)
 
-Read this file together with `references/plan-stage-three.md` (v0.12), which is
+Read this file together with `references/plan-stage-three.md` (v0.13), which is
 the authoritative Stage 3 plan. Decisions are in `references/decisions.md`
-(Decisions 32-54; 54 is proposed). The earlier handoff `references/session-handoff-2026-11-02.md`
+(Decisions 32-54). The earlier handoff `references/session-handoff-2026-11-02.md`
 covers Stages 1 and 2.
 
-## Next Session: Implement Slice D (Unique MACalc Input Filename)
+## Slice D Status (3 November 2026, 18:18 UTC): v7 promoted, packaged test pending
 
-The user's request (3 November 2026): `MACalc_Batch` (Stage 4) needs the MACalc
-input workbook to be uniquely named across synced SharePoint folders, so
-Stage 3 should add a unique suffix to the name. The plan is in
-`references/plan-stage-three.md`, section "Slice D: Unique MACalc Input
-Filename" (steps D0-D6). The proposal (Decision 54, pending) is
-`MACalc input_<Stage 1 run ID>_<token>.xlsb`, for example
-`MACalc input_20261103_161318_3f9c2a7be104d65e.xlsb`, with a fresh
-16-character random token on every run. The run ID alone is not enough: it is
-unique only within one output root, so two Drafts starting Stage 1 in the same
-second, or a copied run folder, would clash. Because the name changes on every
-run, earlier outputs are kept until the new one is verified and audited, then
-deleted, and Stage 4 must read the path from `SST_Stage3_LastSuccessfulOutput`.
+Slice D is implemented in `src/sst_stage_three.py` and its tests but is
+**not yet committed**. The details are in the plan's "Addendum: Slice D
+Implementation Progress", and Decision 54 is approved with changes.
 
-Start the session by:
-1. Committing the pending v6 build fix and release notes (D0; see Outstanding).
-2. Asking the user Q-D1 to Q-D4 from the plan:
-   - Q-D1: any naming rule in `MACalc_Batch` (spaces, pattern, length), and is
-     a 16-character token acceptable or is a full UUID preferred?
-   - Q-D2: delete earlier tokenised outputs after a successful rerun?
-   - Q-D3: does `MACalc_Batch` ignore the dot-prefixed staged file?
-   - Q-D4: leave legacy `MACalc input.xlsb` files in place?
+What Stage 3 now does:
+- **Output name:** `MACalc input_<run ID>_<16 hex>.xlsb`, with a fresh token on
+  every run. Stage 4 must read the path from `SST_Stage3_LastSuccessfulOutput`.
+- **Reruns (Q-D2):** earlier outputs are kept. There is no overwrite prompt,
+  backup or deletion.
+- **Staging (Q-D3):** the workbook is staged in
+  `<output root>\Stage 3 staging\<token>\`, never in the run folder. The folder
+  is removed afterwards, including when OneDrive has marked it read-only.
+  Staging in local `%TEMP%` does not work, because Excel rewrites the
+  template's SharePoint links.
+- **Path limit:** the run stops if the output or staged path exceeds 218
+  characters (Excel's limit). It was first 259 (Q-D1); the user lowered it
+  after the v7 build, so it ships in the next release. The staged path is
+  204 characters on this Draft.
+- **Legacy files (Q-D4):** `MACalc input.xlsb` files are ignored.
 
-   Then record Decision 54 as approved or changed.
-3. Following D1-D6 with tests first. Only `src/sst_stage_three.py` and its
-   tests change. Then build and promote v7 with approval, have the user test
-   Stages 1-3, and commit.
+Verification so far:
+- The full suite gives 885 passed, 85 skipped and the 2 known failures.
+- All 4 opt-in Excel tests pass. The three Stage 3 write tests need
+  `--basetemp` inside the synced folder; the installer test needs the default
+  `%TEMP%`.
+- Three live source-mode runs on `20261103_161318` each printed the accepted
+  Slice C summary.
+
+Status and remaining steps:
+1. Done: the user confirmed that `MACalc_Batch` scans only the folder holding
+   its input (the run folder), so the sibling staging folder is not seen.
+2. Done: the user approved promotion and the central pointer now targets
+   `20261103-cache-v7`. The user's LocalAppData cache is expected to update on
+   the next button click. Rollback is to `20261103-cache-v6`.
+3. Done: the user's packaged Stage 1-3 test on v7 passed. One Stage 1
+   attempt first failed once with `'NoneType' object has no attribute
+   'HeaderRowRange'` in the MAP import. This could not be reproduced (six
+   repeat MAP imports succeeded) and the retry passed; it is unrelated to
+   Slice D.
+4. Done: with approval, committed `feat: Give each MACalc input a unique
+   filename`, including the 218-character path limit.
+5. Next: build and promote a release carrying the 218 limit, when the user
+   approves (v7 still enforces 259).
+   (Supir Commit, with the Co-authored-by trailer).
 
 Do not inspect, change or run `MACalc_Batch` (Decision 51).
 
@@ -168,7 +186,7 @@ requirements at the start of that session.
 
 ## Outstanding
 
-1. **Commit the v6 build fix** before starting Slice D:
+1. **Commit the v6 build fix** before starting Slice D (done: `ce799db`, with the notes in `d4e94c9`):
    - the changes to `tools/build_packaged_stages.py` and
      `tests/test_bonds_lite_input.py`;
    - the release notes in `references/plan-stage-three.md`,
@@ -202,9 +220,9 @@ python -m bonds_lite_input --stage 3 --caller "<Draft FullName from Excel>" `
     --caller-local "<local synced Draft path>" --excel-hwnd <Excel Hwnd>
 ```
 
-Use `python -u` to see the Stage 3 summary as it is printed. If the output
-already exists, the run shows a system-modal overwrite prompt; move the old
-output aside first when running unattended.
+Use `python -u` to see the Stage 3 summary as it is printed. Since Slice D,
+each run writes a new tokenised file and never prompts, so it can run
+unattended. Older v6 builds still prompt before overwriting `MACalc input.xlsb`.
 
 Look up `FullName` and `Hwnd` through `xlwings.apps`. Without
 `--caller-local`, a URL-opened Draft is rejected with "Save and open Draft

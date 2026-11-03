@@ -1,6 +1,6 @@
 # Plan: Stage 3 MACalc Input (Slice A: Template Checks And Funded-Leg Transfer)
 
-Version 0.12 | 3 November 2026 | Slices A and B implemented, run on live data and accepted by the user (Slice B: 3 November, handoff `20261102_111001`). Decisions 47-48 approved. Slice C plan approved by the user on 3 November (Decisions 49-52); Slice C implemented, run live (Succeeded, summary as in C6) and accepted by the user on 3 November; Decision 53 approved. Slices A-C committed in `0f6ef09` and released as `20261103-cache-v6`, live since 3 November after the user's packaged Stage 1-3 run on `20261103_161318`. **Slice D (unique MACalc input filename: run ID plus a fresh random token) planned, awaiting the user's answers and approval (Decision 54).** Stage 5 runs the consuming Python MACalc (`MACalc_Batch`) on the validated MACalc input; Stage 3 does not touch it (Decision 51)
+Version 0.14 | 3 November 2026 | Slices A-C committed in `0f6ef09` and released as `20261103-cache-v6`. **Slice D (unique MACalc input filename: run ID plus a fresh random token) implemented on 3 November with the user's answers to Q-D1 to Q-D4 (Decision 54 approved with changes); `20261103-cache-v7` promoted to the central pointer on 3 November at 18:18 UTC. The user's packaged Stage 1-3 test passed on 3 November. The staged-path limit was then lowered from 259 to 218 characters, which ships in the next release, and Slice D was committed.** Stage 5 runs the consuming Python MACalc (`MACalc_Batch`) on the validated MACalc input; Stage 3 does not touch it (Decision 51)
 
 ## Overview
 
@@ -91,9 +91,9 @@ Rows marked **Confirmed** were approved by the user on 2 November. The rest rema
 | P9 | MACE reading | Open read-only, `update_links=False`, no recalculation, use saved values. |
 | P10 | MACE data guardrails | Stop on blank or duplicate ISINs in MACE, or if a funded row's C, I, AI or any AJ:AUM value is blank, an error or non-numeric. D (Type) must be non-blank text. Every funded ISIN must exist exactly once in MAP, which supplies the descriptive columns. |
 | P11 | Valuation-date guard | Stop if `I. Control!H44` shows its mismatch warning. No other MACE date check in Slice A. |
-| P12 | Output | **Confirmed folder.** `<Stage 1 run folder>/MACalc input.xlsb`, saved directly in the timestamped run folder as a copy of the template. The template is never modified. This is safe for Stage 2 because its runner only picks up direct-child `*.xlsx` files. Slice D (planned) changes the filename to `MACalc input_<run ID>_<token>.xlsb`, with a fresh 16-character random token on every run. |
+| P12 | Output | **Confirmed folder.** `<Stage 1 run folder>/MACalc input.xlsb`, saved directly in the timestamped run folder as a copy of the template. The template is never modified. This is safe for Stage 2 because its runner only picks up direct-child `*.xlsx` files. Slice D (Decision 54) changes the filename to `MACalc input_<run ID>_<token>.xlsb`, with a fresh 16-character random token on every run. |
 | P13 | Button and panel | New "Prepare MACalc" button with a movable `SST_Stage3_Panel` and named audit fields (`SST_Stage3_LastRun`, `_Start`, `_Finish`, `_Elapsed`, `_User`, `_Status`, `_InputRun`, `_LastSuccessfulOutput`), mirroring Stage 2. |
-| P14 | Reruns | Ask before replacing an existing MACalc output. Back it up, restore it on failure and delete the backup only after verified success and saved audit. |
+| P14 | Reruns | Ask before replacing an existing MACalc output. Back it up, restore it on failure and delete the backup only after verified success and saved audit. **Superseded by Slice D (Decision 54):** every run writes a new tokenised file, earlier outputs are kept untouched, and there is no prompt or backup. |
 | P15 | Packaging | Include in the packaged controller after tests pass, as release `cache-v5`, with explicit user approval before promotion. |
 | P16 | Anomalous MACE vectors | Stop with an error if any MACE funding row has mixed signs (both positive and negative months) or any positive month. Neither occurs in current data, and either would mean the funding leg is not purely a liability. All-zero rows are not funded. |
 | P17 | MAP/MACE reconciliation | Stop if the MACE-funded set differs from the set of MAP assets with any negative month (min(Q:ATT) < 0). Both sets are the same 5 assets today. This catches MACE and Stage 1 data from different valuation dates or portfolios. |
@@ -307,7 +307,7 @@ See `references/decisions.md`: Decision 36 records the user's requirements; Deci
 5. **Zero funded:** warn the user and continue.
 
 6. **Anomalous MACE vectors and MAP/MACE set differences:** stop and report the issue; both empty means warn and continue (approved).
-7. **Output filename/format:** `MACalc input.xlsb` (approved).
+7. **Output filename/format:** `MACalc input.xlsb` (approved). Changed by Slice D (Decision 54) to `MACalc input_<run ID>_<token>.xlsb`.
 
 ## Remaining Operational Steps
 
@@ -907,7 +907,7 @@ There were 5 funded and 988 asset rows; 8 MACE-only rows were ignored in each of
 
 ## Slice D: Unique MACalc Input Filename
 
-Planned on 3 November 2026 for implementation in a new session; revised the same day so that the suffix is collision-resistant across synced folders, not just within one output root. **PENDING:** the user's answers to Q-D1 to Q-D4 and approval of Decision 54.
+Planned on 3 November 2026 for implementation in a new session; revised the same day so that the suffix is collision-resistant across synced folders, not just within one output root. **Answered and implemented on 3 November 2026:** the user's answers to Q-D1 to Q-D4 changed D4 and D6 to D8 (see the design table and "Addendum: Slice D Implementation Progress"). Decision 54 is approved with changes.
 
 ### Overview
 
@@ -931,18 +931,18 @@ The Python MACalc used in Stage 4 (`MACalc_Batch`) needs each MACalc input workb
 - Path length on this Draft: today's output path is 154 characters; the new name adds 33 (`_20261103_161318_` plus 16 token characters), giving about 187. That is under Windows' 260 limit and Excel's 218-character limit for opening a workbook path, but colleagues with longer OneDrive paths could exceed 218, hence D7.
 - `MACalc_Batch` was not inspected (Decision 51). Its naming rules are not known; see Q-D1.
 
-### Proposed Design (PENDING, Decision 54)
+### Design (Decision 54, approved with changes on 3 November 2026)
 
-| ID | Topic | Proposal |
+| ID | Topic | Design |
 |---|---|---|
-| D1 | Name | `MACalc input_<run ID>_<token>.xlsb`. `<run ID>` is the run folder name; `<token>` is `secrets.token_hex(8)` (16 lowercase hex characters, 64 random bits). |
-| D2 | Uniqueness | A fresh token on every run, so no two Stage 3 runs share a name, whatever the Draft, user, output root or copied folder. With 64 random bits, the chance of any clash among 10,000 outputs is about 3 in a trillion (birthday bound n?/2??). Stage 3 cannot see every synced folder, so this is collision resistance rather than a registry check; it additionally regenerates the token if the name already exists in the run folder. |
-| D3 | Run ID check | The run folder name must fully match `\d{8}_\d{6}(_\d{3})?`. Otherwise Stage 3 raises `StageThreeError` naming the folder, before any prompt, audit or file write. |
-| D4 | Reruns on the same handoff | Stage 3 looks in the run folder for earlier outputs of this run, i.e. names fully matching `MACalc input_<run ID>_[0-9a-f]{16}\.xlsb`. If there are any, it asks once, listing them: "Replace the existing MACalc input?". Declining changes nothing (as today). Accepting writes the new tokenised file alongside them; the earlier files are **not touched until** the new file is verified, published and the `Succeeded` audit is saved, and are then deleted. If a deletion fails, Stage 3 logs a warning naming the file (as it does for an undeletable backup today) and still succeeds. |
-| D5 | Failure and rollback | Because the new name never equals an earlier one, nothing has to be renamed aside or restored: on failure Stage 3 deletes only the file this run published (if the audit was not committed) and its staged file, and earlier outputs remain exactly as they were. `_backup_path` and the backup/restore branch are removed. The P14 guarantee (the previous output survives any failure) is kept by construction. |
-| D6 | Legacy outputs | A plain `MACalc input.xlsb` in a run folder is never prompted for, renamed or deleted. If present, Stage 3 logs one information line saying it is a legacy output left in place. |
-| D7 | Path length | Before any prompt or write, Stage 3 stops with `StageThreeError` if the full output path exceeds 218 characters, telling the user to shorten the output folder path. |
-| D8 | Staged file | Name unchanged (`.MACalc-stage3-<random>.xlsb`): dot-prefixed, short-lived and already random; see Q-D3. |
+| D1 | Name | `MACalc input_<run ID>_<token>.xlsb`. `<run ID>` is the run folder name; `<token>` is `secrets.token_hex(8)` (16 lowercase hex characters, 64 random bits). Q-D1: `MACalc_Batch` has no naming conventions. |
+| D2 | Uniqueness | A fresh token on every run, so no two Stage 3 runs share a name, whatever the Draft, user, output root or copied folder. With 64 random bits, the chance of any clash among 10,000 outputs is about 3 in a trillion (birthday bound n²/2⁶⁵). Stage 3 cannot see every synced folder, so this is collision resistance rather than a registry check; it additionally regenerates the token if the name already exists in the run folder. |
+| D3 | Run ID check | The run folder name must fully match `\d{8}_\d{6}(_\d{3})?`. Otherwise Stage 3 raises `StageThreeError` naming the folder, before any audit or file write. |
+| D4 | Reruns on the same handoff | **Changed (Q-D2):** earlier outputs are kept. Every rerun writes a new tokenised file alongside them, with no prompt and no deletion. `SST_Stage3_LastSuccessfulOutput` points to the newest successful output. |
+| D5 | Failure and rollback | Because the new name never equals an earlier one, nothing has to be renamed aside or restored: on failure Stage 3 deletes only the file this run published (if the audit was not committed) and its staged file, and earlier outputs remain exactly as they were. `_backup_path`, `_confirm_overwrite` and the backup/restore branch are removed. The P14 guarantee (the previous output survives any failure) is kept by construction. |
+| D6 | Legacy outputs | **Changed (Q-D4):** a plain `MACalc input.xlsb` is simply ignored; no prompt, log line, rename or deletion. Those run folders will be deleted. |
+| D7 | Path length | **Changed (Q-D1):** before any write, Stage 3 stops with `StageThreeError` if the output path **or the staged path** exceeds 218 characters (Excel's limit for opening or saving a workbook; first 259, lowered by the user on 3 November), telling the user to shorten the output folder path. |
+| D8 | Staged file | **Changed (Q-D3):** `MACalc_Batch` does not ignore dot-prefixed files, so nothing is staged in the run folder. The workbook is staged as `<output root>\Stage 3 staging\<token>\<final name>`, a sibling of the run folders, and the token folder is removed after every run (the `Stage 3 staging` folder too, once empty). Local `%TEMP%` was tried and rejected: Excel rewrites the template's SharePoint link paths when saving outside the synced folder, and the read-back link check stops the run. OneDrive marks the folders read-only, so removal clears that flag and retries; a folder that still cannot be removed is logged as a warning. The user confirmed on 3 November that `MACalc_Batch` scans only the folder holding the MACalc input it is given (the run folder), so the sibling staging folder is not seen. |
 | D9 | Stage 4 contract | Stage 4 must read `SST_Stage3_LastSuccessfulOutput` (and check `SST_Stage3_InputRun` matches the handoff) to find its input. It must not build or glob the filename. |
 | D10 | Release | Build a new release (for example `<date>-cache-v7`) without `--promote`; check that the model bundles exactly v4/v6's modules and the controller v6's; run both self-tests; promote with the user's approval; the user tests Stages 1-3. Rollback is to `20261103-cache-v6`. |
 
@@ -962,12 +962,12 @@ Alternatives for Decision 54:
 
 ### Steps
 
-**D0. Prerequisites.**
+**D0. Prerequisites.** [? Implemented ? see addendum]
 - Commit the v6 build fix (`tools/build_packaged_stages.py` and its regression test in `tests/test_bonds_lite_input.py`) with the v6 release notes and the Slice D plan.
 - Get the answers to Q-D1 to Q-D4 and record Decision 54 as approved or changed.
 - Verify: `git status` shows no tracked source changes apart from the two `.pyc` files.
 
-**D1. Write the tests first** in `tests/test_sst_stage_three.py` (depends on D0):
+**D1. Write the tests first** [? Implemented ? see addendum] in `tests/test_sst_stage_three.py` (depends on D0):
 - `test_output_filename_joins_run_id_and_token`: `stage_three.output_filename(Path("Bonds Lite output") / "20261103_161318", "3f9c2a7be104d65e") == "MACalc input_20261103_161318_3f9c2a7be104d65e.xlsb"`.
 - `test_output_filename_keeps_collision_suffix`: run folder `20261103_161318_001` gives `MACalc input_20261103_161318_001_<token>.xlsb`.
 - `test_output_filename_rejects_unexpected_run_folder`, parametrised over `""`, `"Bonds Lite output"`, `"20261103"` and `"20261103_161318 copy"`: raises `StageThreeError` matching `"run folder"`.
@@ -986,7 +986,7 @@ Alternatives for Decision 54:
 - Use an injectable token source (for example a module-level `_token = secrets.token_hex` that tests monkeypatch) so names are deterministic in tests.
 - Verify: the new and updated tests fail for the expected reason (missing functions, the old fixed name, or the old backup behaviour), and nothing else fails.
 
-**D2. Implement** in `src/sst_stage_three.py` (depends on D1):
+**D2. Implement** [? Implemented ? see addendum] in `src/sst_stage_three.py` (depends on D1):
 - Replace `OUTPUT_FILENAME` with `OUTPUT_STEM = "MACalc input"`, `OUTPUT_EXTENSION = ".xlsb"`, `LEGACY_OUTPUT_FILENAME = "MACalc input.xlsb"`, `MAX_OUTPUT_PATH = 218` and compiled run-ID and token patterns.
 - Add small pure helpers:
 
@@ -1005,16 +1005,16 @@ Alternatives for Decision 54:
 - Publishing: `staged_path.replace(output_path)`, write the `Succeeded` audit, then delete each of `previous_outputs`, logging a warning for any that cannot be deleted. Remove `_backup_path` and the backup/restore branch; on failure, delete only `output_path` if this run published it and the audit was not committed.
 - Verify: `python -m pytest -q -p no:cacheprovider` gives 866 plus the new tests passed, 85 skipped, and only the 2 known failures (`test_frozen_main_validates_cached_bundle_before_stage_dispatch` and `test_model_results_transaction_rollback_failure_retains_recoverable_backup`).
 
-**D3. Opt-in Excel tests** (depends on D2): set `BONDS_LITE_RUN_STAGE_THREE_EXCEL_TESTS=1` and run with `-m excel`, with the Draft closed.
+**D3. Opt-in Excel tests** [? Implemented ? see addendum] (depends on D2): set `BONDS_LITE_RUN_STAGE_THREE_EXCEL_TESTS=1` and run with `-m excel`, with the Draft closed.
 - Verify: 4 passed. The `0x80010108` teardown message is harmless.
 
-**D4. Update the docs** (parallel with D3):
+**D4. Update the docs** [? Implemented ? see addendum] (parallel with D3):
 - P12, P14 and Resolved Question 7 in this plan, plus an implementation addendum.
 - `references/bonds-lite-setup.md`, around lines 110 and 130: the new name, that it changes on every run, and that Stage 4 reads it from `SST_Stage3_LastSuccessfulOutput`.
 - The handoff.
 - Decision 54 marked as approved.
 
-**D5. Live source-mode run** (depends on D2): on the current handoff (today `20261103_161318`, if `SST_Stage2_InputRun` matches it). Run Stage 3 twice.
+**D5. Live source-mode run** [? Implemented ? see addendum] (depends on D2): on the current handoff (today `20261103_161318`, if `SST_Stage2_InputRun` matches it). Run Stage 3 twice.
 - Verify after the first run:
   - exactly one `MACalc input_20261103_161318_<token>.xlsb` exists and the audit shows `Succeeded`;
   - `SST_Stage3_LastSuccessfulOutput` points to it;
@@ -1035,16 +1035,52 @@ Alternatives for Decision 54:
 
 ### Affected Files (Slice D)
 
-- `src/sst_stage_three.py`: the name constants, `output_filename`, `new_output_path`, `previous_run_outputs`, `_confirm_overwrite` (takes the list of earlier outputs), `run_stage_three` publishing and failure handling; `_backup_path` removed.
+- `src/sst_stage_three.py`: the name constants, `output_filename`, `new_output_path`, the staging folder in the output root and its read-only-aware removal, and `run_stage_three` publishing and failure handling; `_backup_path` and `_confirm_overwrite` removed. (`previous_run_outputs` was not needed once Q-D2 kept earlier outputs.)
 - `tests/test_sst_stage_three.py`: new and updated tests.
 - `references/plan-stage-three.md`, `references/bonds-lite-setup.md`, `references/decisions.md` (Decision 54) and the Stage 3 handoff.
 - No changes to `src/bonds_lite_input.py`, the VBA, the Draft or the build script.
 
 ### Risks And Unknowns (Slice D)
 
-- `MACalc_Batch`'s naming rules are assumed, not verified (Q-D1). If it needs a different pattern or length, only `output_filename` and the patterns change.
-- Uniqueness is probabilistic (64 random bits per run), not checked against every synced folder, which Stage 3 cannot see. The clash risk is negligible at the expected volumes; a full UUID is the fallback (Q-D1).
+- `MACalc_Batch` has no naming rules (Q-D1, answered by the user); its code was not inspected (Decision 51).
+- Uniqueness is probabilistic (64 random bits per run), not checked against every synced folder, which Stage 3 cannot see. The clash risk is negligible at the expected volumes.
 - The name changes on every rerun, so anything that remembered the old path (a user's shortcut, a Stage 4 configuration) must use `SST_Stage3_LastSuccessfulOutput` instead (D9).
-- If `MACalc_Batch` scans synced folders for every `.xlsb` file, the legacy files and the short-lived staged file could still be picked up (Q-D3, Q-D4).
-- Until v7 is live, the packaged Prepare MACalc button keeps writing `MACalc input.xlsb`. Stage 4 must not start before then.
-- Path length: about 187 characters on this Draft, near Excel's 218 limit. D7 stops cleanly rather than writing a file Excel cannot open, but colleagues with long OneDrive paths may need to shorten their output folder.
+- Earlier outputs accumulate in the run folder (Q-D2). If `MACalc_Batch` is pointed at a run folder rather than a single file, it will see every rerun's output; it must take the path from the audit (D9).
+- The short-lived staged workbook lives in `<output root>\Stage 3 staging\`. `MACalc_Batch` scans only the folder holding its input (user, 3 November), so it does not see it.
+- Because `MACalc_Batch` scans the run folder, it will also see earlier tokenised outputs kept there (Q-D2) and any other workbooks in that folder.
+- v7 is live in the central pointer, but this user's LocalAppData cache remains on v6 until Excel checks the pointer on its next button click. Stage 4 must not start until the packaged Stage 1-3 test has passed.
+- Path length: the output path is 187 characters on this Draft and the staged path 204. D7 stops cleanly above 218 characters, Excel's limit for opening or saving a workbook path. The staged path therefore has 14 characters of headroom on this Draft; a colleague with a longer OneDrive path gets D7's message before any write.
+
+## Addendum: Slice D Implementation Progress
+
+**3 November 2026.**
+
+- **D0.** The full suite gave 866 passed, 85 skipped and the 2 known failures. Committed `ce799db` (`fix: Hidden-import Stage 3 in the controller build only`) and `d4e94c9` (`docs: Plan Slice D and record the v6 release`, including the Draft, at the user's request).
+- **User answers.** Q-D1: no naming conventions; stay within the Windows path limit. Q-D2: keep earlier outputs. Q-D3: `MACalc_Batch` does not ignore dot-prefixed files, so stage elsewhere. Q-D4: leave legacy files; those run folders will be deleted. Decision 54 is approved with these changes; the design table above is updated.
+- **D1-D2.** Tests were written first and failed for the expected reasons; the change is only in `src/sst_stage_three.py`.
+- **Final suite:** 885 passed, 85 skipped, only the 2 known failures.
+
+**Deviations from the plan (all from the user's answers, Decision 54):**
+1. No overwrite prompt, no deletion of earlier outputs and no `previous_run_outputs` helper (Q-D2). The tests planned for prompting and deletion became `test_run_stage_three_rerun_keeps_earlier_output_without_prompting`.
+2. The path limit applies to the staged path as well as the output path. It was first 259 (Windows `MAX_PATH`, Q-D1). After the packaged test the user lowered it to the planned 218, so that a long path stops before any write instead of failing inside Excel. The 218 limit is not in `20261103-cache-v7`; it ships in the next release.
+3. Staging moved from the run folder to `<output root>\Stage 3 staging\<token>\` (Q-D3). Local `%TEMP%` was tried first and rejected: Excel rewrites the template's SharePoint link paths when the copy is saved outside the synced folder, so the read-back link check stops the run, and restoring the links reorders them and raised a COM error.
+4. The first live run showed that OneDrive marks the staging folders read-only, so `shutil.rmtree(..., ignore_errors=True)` silently left empty folders behind. Removal now clears the read-only flag and retries, and logs a warning if a folder still cannot be removed. Tests: `test_run_stage_three_removes_staging_folders_marked_read_only` and `test_run_stage_three_warns_when_staging_folder_cannot_be_removed`.
+5. No legacy log line (Q-D4); legacy files are simply ignored.
+
+**D3, opt-in Excel tests.** These were run with `BONDS_LITE_RUN_STAGE_THREE_EXCEL_TESTS=1` and `-m excel`, with the Draft closed. All 4 pass, each in a different location:
+- The three Stage 3 write tests pass with `--basetemp` set to a throwaway folder inside the synced repository, deleted afterwards. In the default local `%TEMP%` they fail at the link check for the reason given in deviation 3. This is a test-location effect and not a Slice D regression.
+- The Draft-copy installer test passes in the default `%TEMP%`, but fails with a COM error on `Names` when it is run in the OneDrive basetemp.
+
+**D5, live source-mode runs.** There were three runs on handoff `20261103_161318` (Draft opened in Excel by the agent; Excel reports its SharePoint URL, so `--caller-local` was used; `SST_Stage2_InputRun` matched).
+- The legacy `MACalc input.xlsb` had already been renamed by the user to `MACalc input_test.xlsb` before the session. That file and `MACalc input_test_unoptimised_assets.csv` were byte-for-byte unchanged afterwards.
+- **Run 1** (112.5 s) wrote `MACalc input_20261103_161318_c72f95ed916b8491.xlsb`.
+- **Run 2** wrote `..._64bb8099ead76e39.xlsb`. The first file was kept and the audit pointed to the new one (`Succeeded`).
+- **Run 3** (98.2 s, after the read-only fix) wrote `..._3889e5420fb7e83a.xlsb` and left no `Stage 3 staging` folder. The two empty token folders left by runs 1 and 2 were removed by hand.
+- Every run printed the accepted Slice C summary: Forced 19/5/0/0, Min 0/106/58/0, Pre16 0/31/291/0 and REITs 0/16/0/0, with no duplicates removed. Each run had 5 funded and 988 asset rows, with 8 MACE-only rows ignored in each of `I. Bonds` and `Control`.
+- There were no `*.backup.xlsb` or `.MACalc-stage3-*` files.
+
+**Open:**
+- (Resolved) The user confirmed that `MACalc_Batch` scans only the folder holding its input, i.e. the run folder, not the output root where staging lives.
+- **D6 build (3 November, about 18:15).** `20261103-cache-v7` was built from the uncommitted Slice D working tree on top of `d4e94c9`, with the same build venvs (`controller-py313`, `model-py311`) and model folder as v6, **without `--promote`**. Both self-tests passed (`MODEL_SELF_TEST_OK`, `CONTROLLER_SELF_TEST_OK`). Compared with v6: the model has the same 869 files and 1,770 frozen modules, with no Stage 3 modules; the controller has the same 82 files and 469 modules (including `bonds_lite_input` and `sst_stage_three`), and nothing was added or removed. The v7 controller's `sst_stage_three` contains `STAGING_FOLDER` and `_remove_staging` and no longer contains `_confirm_overwrite`; v6's is the reverse. The central `current.txt` still points to v6. **Awaiting the user's approval to promote.**
+- **D6 promotion (3 November, 18:18 UTC).** The user approved promotion. The central `current.txt` now points to `20261103-cache-v7`; the LocalAppData cache is expected to update on the next button click. Rollback is to `20261103-cache-v6`.
+- D6, still to do: the user's packaged Stage 1-3 test and the final Slice D commit.

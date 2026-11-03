@@ -146,7 +146,7 @@ def test_excel_macalc_write_preserves_template_links_and_protected_rows(
     stage_three = _stage_three()
     template = Path(__file__).resolve().parents[1] / "MACalcinPython_v4.0f.xlsb"
     template_hash = hashlib.sha256(template.read_bytes()).digest()
-    output = tmp_path / stage_three.OUTPUT_FILENAME
+    output = tmp_path / "MACalc output.xlsb"
     layout = stage_three._read_template_snapshot(template).layout
 
     cleared_through = stage_three.write_macalc_output(
@@ -261,7 +261,7 @@ def test_excel_slice_b_real_data_regression_on_handoff_111001(
             for key, value in zip(source.keys, source_values)
             if key in set(identity.values())
         }
-    output = tmp_path / stage_three.OUTPUT_FILENAME
+    output = tmp_path / "MACalc output.xlsb"
 
     cleared_through = stage_three.write_macalc_output(
         template, output, layout, funded_rows, asset_rows,
@@ -971,22 +971,110 @@ def test_resolve_stage_three_inputs_rejects_missing_map_file(
         stage_three.resolve_stage_three_inputs(caller)
 
 
+def test_output_filename_joins_run_id_and_token() -> None:
+    stage_three = _stage_three()
+
+    name = stage_three.output_filename(
+        Path("Bonds Lite output") / "20261103_161318", "3f9c2a7be104d65e"
+    )
+
+    assert name == "MACalc input_20261103_161318_3f9c2a7be104d65e.xlsb"
+
+
+def test_output_filename_keeps_collision_suffix() -> None:
+    stage_three = _stage_three()
+
+    name = stage_three.output_filename(
+        Path("Bonds Lite output") / "20261103_161318_001", "3f9c2a7be104d65e"
+    )
+
+    assert name == "MACalc input_20261103_161318_001_3f9c2a7be104d65e.xlsb"
+
+
+@pytest.mark.parametrize(
+    "folder", ["", "Bonds Lite output", "20261103", "20261103_161318 copy"]
+)
+def test_output_filename_rejects_unexpected_run_folder(folder: str) -> None:
+    stage_three = _stage_three()
+
+    with pytest.raises(stage_three.StageThreeError, match="run folder"):
+        stage_three.output_filename(Path(folder), "3f9c2a7be104d65e")
+
+
+def test_new_output_token_is_16_lowercase_hex_and_varies() -> None:
+    import re
+
+    stage_three = _stage_three()
+
+    tokens = [stage_three._token() for _ in range(1000)]
+
+    assert all(re.fullmatch(r"[0-9a-f]{16}", token) for token in tokens)
+    assert len(set(tokens)) == 1000
+
+
+def test_new_output_path_regenerates_token_when_name_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage_three = _stage_three()
+    run_folder = tmp_path / "20261103_161318"
+    run_folder.mkdir()
+    (run_folder / "MACalc input_20261103_161318_aaaaaaaaaaaaaaaa.xlsb").write_bytes(
+        b"existing"
+    )
+    tokens = iter(["aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"])
+    monkeypatch.setattr(stage_three, "_token", lambda: next(tokens))
+
+    path = stage_three.new_output_path(run_folder)
+
+    assert path == run_folder / "MACalc input_20261103_161318_bbbbbbbbbbbbbbbb.xlsb"
+
+
+def test_new_output_path_stops_when_no_unused_name_is_found(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage_three = _stage_three()
+    run_folder = tmp_path / "20261103_161318"
+    run_folder.mkdir()
+    (run_folder / "MACalc input_20261103_161318_aaaaaaaaaaaaaaaa.xlsb").write_bytes(
+        b"existing"
+    )
+    monkeypatch.setattr(stage_three, "_token", lambda: "aaaaaaaaaaaaaaaa")
+
+    with pytest.raises(stage_three.StageThreeError, match="unused"):
+        stage_three.new_output_path(run_folder)
+
+
+NEW_TOKEN = "0123456789abcdef"
+NEW_OUTPUT_NAME = f"MACalc input_20261102_111001_{NEW_TOKEN}.xlsb"
+EARLIER_OUTPUT_NAME = "MACalc input_20261102_111001_aaaaaaaaaaaaaaaa.xlsb"
+
+
 def _mock_stage_three_run(
     monkeypatch: pytest.MonkeyPatch,
     stage_three: Any,
     tmp_path: Path,
     existing_output: bool,
 ) -> tuple[Any, Path, list[dict[str, object]], list[str]]:
+    """Return the caller, the expected new output path, audit writes and messages.
+
+    With ``existing_output`` an earlier tokenised output of the same run holds
+    ``b"previous"`` at ``EARLIER_OUTPUT_NAME``.
+    """
     import contextlib
+
     import bonds_lite_input as shared
 
     caller_path = tmp_path / "Draft.xlsm"
     caller_path.write_bytes(b"Draft")
     run_folder = tmp_path / "Bonds Lite output" / "20261102_111001"
     run_folder.mkdir(parents=True)
-    output = run_folder / stage_three.OUTPUT_FILENAME
+    output = run_folder / NEW_OUTPUT_NAME
     if existing_output:
-        output.write_bytes(b"previous")
+        (run_folder / EARLIER_OUTPUT_NAME).write_bytes(b"previous")
+    tokens = iter([NEW_TOKEN, "fedcba9876543210"])
+    monkeypatch.setattr(stage_three, "_token", lambda: next(tokens))
     caller = SimpleNamespace()
     writes: list[dict[str, object]] = []
     messages: list[str] = []
@@ -1016,7 +1104,6 @@ def _mock_stage_three_run(
         stage_three, "_read_stage_three_fields",
         lambda book: {"last_output": "Bonds Lite output/previous"},
     )
-    monkeypatch.setattr(stage_three, "_confirm_overwrite", lambda book, path: True)
     monkeypatch.setattr(
         stage_three,
         "resolve_stage_three_inputs",
@@ -1098,13 +1185,170 @@ def test_run_stage_three_zero_funded_succeeds_and_warns_without_overwriting_temp
     assert writes[-1]["status"] == "Succeeded"
     assert writes[-1]["input_run"] == "Bonds Lite output/20261102_111001"
     assert writes[-1]["last_output"] == (
-        "Bonds Lite output/20261102_111001/MACalc input.xlsb"
+        f"Bonds Lite output/20261102_111001/{NEW_OUTPUT_NAME}"
     )
     assert "0 funded assets" in messages[-1]
-    assert not list(output.parent.glob("*.backup.xlsb"))
+    assert [path.name for path in output.parent.iterdir()] == [NEW_OUTPUT_NAME]
 
 
-def test_run_stage_three_declined_overwrite_does_not_change_audit_or_output(
+def test_run_stage_three_publishes_one_tokenised_output_and_audits_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import re
+
+    stage_three = _stage_three()
+    caller, output, writes, _ = _mock_stage_three_run(
+        monkeypatch, stage_three, tmp_path, existing_output=False
+    )
+    tokens = iter(["3f9c2a7be104d65e"])
+    monkeypatch.setattr(stage_three, "_token", lambda: next(tokens))
+
+    result = stage_three.run_stage_three(caller)
+
+    published = list(output.parent.iterdir())
+    assert len(published) == 1 and published == [result]
+    assert re.fullmatch(
+        r"MACalc input_20261102_111001_[0-9a-f]{16}\.xlsb", result.name
+    )
+    assert writes[-1]["status"] == "Succeeded"
+    assert writes[-1]["last_output"] == (
+        f"Bonds Lite output/20261102_111001/{result.name}"
+    )
+
+
+def _staging_root(tmp_path: Path) -> Path:
+    return tmp_path / "Bonds Lite output" / "Stage 3 staging"
+
+
+def test_run_stage_three_stages_in_output_root_outside_run_folder_and_cleans_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage_three = _stage_three()
+    caller, output, _, _ = _mock_stage_three_run(
+        monkeypatch, stage_three, tmp_path, existing_output=False
+    )
+    staged_paths: list[Path] = []
+    run_folder_during_write: list[list[str]] = []
+
+    def write_output(template, staged, layout, rows, assets=(), isin_lists=()):
+        staged_paths.append(staged)
+        staged.write_bytes(b"new")
+        run_folder_during_write.append(
+            [path.name for path in output.parent.iterdir()]
+        )
+        return 20
+
+    monkeypatch.setattr(stage_three, "write_macalc_output", write_output)
+
+    stage_three.run_stage_three(caller)
+
+    # Staying in the synced output root keeps Excel's link paths unchanged.
+    assert staged_paths == [_staging_root(tmp_path) / NEW_TOKEN / NEW_OUTPUT_NAME]
+    assert run_folder_during_write == [[]]
+    assert not _staging_root(tmp_path).exists()
+    assert output.read_bytes() == b"new"
+
+
+def test_run_stage_three_keeps_staging_root_holding_other_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage_three = _stage_three()
+    caller, output, _, _ = _mock_stage_three_run(
+        monkeypatch, stage_three, tmp_path, existing_output=False
+    )
+    other = _staging_root(tmp_path) / "fedcba9876543210" / "other.xlsb"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"other run")
+
+    stage_three.run_stage_three(caller)
+
+    assert other.read_bytes() == b"other run"
+    assert [path.name for path in _staging_root(tmp_path).iterdir()] == [
+        "fedcba9876543210"
+    ]
+    assert output.read_bytes() == b"new"
+
+
+def test_run_stage_three_removes_staging_folders_marked_read_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+    import stat
+
+    stage_three = _stage_three()
+    caller, output, _, _ = _mock_stage_three_run(
+        monkeypatch, stage_three, tmp_path, existing_output=False
+    )
+
+    def write_output(template, staged, layout, rows, assets=(), isin_lists=()):
+        staged.write_bytes(b"new")
+        # OneDrive marks synced folders read-only, which blocks a plain rmdir.
+        for folder in (staged.parent, staged.parent.parent):
+            os.chmod(folder, stat.S_IREAD)
+        assert not os.stat(staged.parent).st_mode & stat.S_IWRITE
+        return 20
+
+    monkeypatch.setattr(stage_three, "write_macalc_output", write_output)
+
+    stage_three.run_stage_three(caller)
+
+    assert not _staging_root(tmp_path).exists()
+    assert output.read_bytes() == b"new"
+
+
+def test_run_stage_three_warns_when_staging_folder_cannot_be_removed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import shutil
+
+    stage_three = _stage_three()
+    caller, output, writes, _ = _mock_stage_three_run(
+        monkeypatch, stage_three, tmp_path, existing_output=False
+    )
+    warnings: list[str] = []
+
+    def failing_rmtree(path, *args, **kwargs):
+        raise OSError("locked by sync")
+
+    monkeypatch.setattr(shutil, "rmtree", failing_rmtree)
+    monkeypatch.setattr(
+        stage_three.logger,
+        "warning",
+        lambda message, *args: warnings.append(message % args),
+    )
+
+    result = stage_three.run_stage_three(caller)
+
+    assert result == output and writes[-1]["status"] == "Succeeded"
+    assert any(str(_staging_root(tmp_path) / NEW_TOKEN) in text for text in warnings)
+
+
+def test_run_stage_three_rejects_staged_path_over_windows_limit_before_any_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage_three = _stage_three()
+    caller, output, writes, messages = _mock_stage_three_run(
+        monkeypatch, stage_three, tmp_path, existing_output=False
+    )
+    staged = _staging_root(tmp_path) / NEW_TOKEN / NEW_OUTPUT_NAME
+    assert len(str(staged)) > len(str(output))
+    monkeypatch.setattr(stage_three, "MAX_OUTPUT_PATH", len(str(staged)) - 1)
+
+    with pytest.raises(stage_three.StageThreeError, match="characters"):
+        stage_three.run_stage_three(caller)
+
+    assert writes == [] and messages == []
+    assert list(output.parent.iterdir()) == []
+    assert not _staging_root(tmp_path).exists()
+
+
+def test_run_stage_three_rerun_keeps_earlier_output_without_prompting(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1112,13 +1356,79 @@ def test_run_stage_three_declined_overwrite_does_not_change_audit_or_output(
     caller, output, writes, _ = _mock_stage_three_run(
         monkeypatch, stage_three, tmp_path, existing_output=True
     )
-    monkeypatch.setattr(stage_three, "_confirm_overwrite", lambda book, path: False)
+    earlier = output.with_name(EARLIER_OUTPUT_NAME)
 
     result = stage_three.run_stage_three(caller)
 
-    assert result is None
-    assert output.read_bytes() == b"previous"
-    assert writes == []
+    assert not hasattr(stage_three, "_confirm_overwrite")
+    assert result == output
+    assert earlier.read_bytes() == b"previous"
+    assert output.read_bytes() == b"new"
+    assert sorted(path.name for path in output.parent.iterdir()) == sorted(
+        [EARLIER_OUTPUT_NAME, NEW_OUTPUT_NAME]
+    )
+    assert writes[-1]["last_output"] == (
+        f"Bonds Lite output/20261102_111001/{NEW_OUTPUT_NAME}"
+    )
+
+
+def test_run_stage_three_leaves_legacy_output_untouched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage_three = _stage_three()
+    caller, output, _, _ = _mock_stage_three_run(
+        monkeypatch, stage_three, tmp_path, existing_output=False
+    )
+    legacy = output.with_name("MACalc input.xlsb")
+    legacy.write_bytes(b"legacy")
+
+    stage_three.run_stage_three(caller)
+
+    assert legacy.read_bytes() == b"legacy"
+    assert output.read_bytes() == b"new"
+
+
+def test_run_stage_three_rejects_unexpected_run_folder_before_any_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bonds_lite_input as shared
+
+    stage_three = _stage_three()
+    caller, _, writes, messages = _mock_stage_three_run(
+        monkeypatch, stage_three, tmp_path, existing_output=False
+    )
+    copied = tmp_path / "Bonds Lite output" / "20261102_111001 copy"
+    copied.mkdir()
+    monkeypatch.setattr(shared, "resolve_stage_input", lambda book: copied)
+
+    with pytest.raises(stage_three.StageThreeError, match="run folder"):
+        stage_three.run_stage_three(caller)
+
+    assert writes == [] and messages == []
+    assert list(copied.iterdir()) == []
+
+
+def test_run_stage_three_rejects_output_path_over_windows_limit_before_any_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage_three = _stage_three()
+    caller, output, writes, messages = _mock_stage_three_run(
+        monkeypatch, stage_three, tmp_path, existing_output=False
+    )
+    monkeypatch.setattr(stage_three, "MAX_OUTPUT_PATH", len(str(output)) - 1)
+
+    with pytest.raises(stage_three.StageThreeError, match="characters"):
+        stage_three.run_stage_three(caller)
+
+    assert writes == [] and messages == []
+    assert list(output.parent.iterdir()) == []
+
+
+def test_max_output_path_is_the_excel_limit() -> None:
+    assert _stage_three().MAX_OUTPUT_PATH == 218
 
 
 def test_run_stage_three_rolls_back_output_when_success_audit_fails(
@@ -1140,7 +1450,9 @@ def test_run_stage_three_rolls_back_output_when_success_audit_fails(
     with pytest.raises(OSError, match="audit save failed"):
         stage_three.run_stage_three(caller)
 
-    assert output.read_bytes() == b"previous"
+    assert output.with_name(EARLIER_OUTPUT_NAME).read_bytes() == b"previous"
+    assert [path.name for path in output.parent.iterdir()] == [EARLIER_OUTPUT_NAME]
+    assert not _staging_root(tmp_path).exists()
     assert writes[-1]["status"] == "Failed"
 
 
@@ -1173,6 +1485,7 @@ def test_run_stage_three_removes_partial_staged_file_after_write_failure(
 
     assert not output.exists()
     assert staged_paths and not staged_paths[0].exists()
+    assert not _staging_root(tmp_path).exists()
     assert writes[-1]["status"] == "Failed"
 
 
@@ -2141,8 +2454,8 @@ def test_run_stage_three_slice_b_guard_failure_keeps_previous_output(
     assert writes[0]["status"] == "Running"
     assert writes[-1]["status"] == "Failed"
     assert writes[-1]["last_output"] == "Bonds Lite output/previous"
-    assert output.read_bytes() == b"previous"
-    assert [path.name for path in output.parent.iterdir()] == [output.name]
+    assert output.with_name(EARLIER_OUTPUT_NAME).read_bytes() == b"previous"
+    assert [path.name for path in output.parent.iterdir()] == [EARLIER_OUTPUT_NAME]
 
 
 def test_run_stage_three_writes_both_blocks_and_warns_on_csv_map_difference(
@@ -2828,8 +3141,8 @@ def test_run_stage_three_slice_c_guard_failure_keeps_previous_output(
     assert writes[0]["status"] == "Running"
     assert writes[-1]["status"] == "Failed"
     assert writes[-1]["last_output"] == "Bonds Lite output/previous"
-    assert output.read_bytes() == b"previous"
-    assert [path.name for path in output.parent.iterdir()] == [output.name]
+    assert output.with_name(EARLIER_OUTPUT_NAME).read_bytes() == b"previous"
+    assert [path.name for path in output.parent.iterdir()] == [EARLIER_OUTPUT_NAME]
 
 
 def test_run_stage_three_passes_aligned_lists_to_the_single_write_and_verify(
@@ -2935,7 +3248,7 @@ def test_excel_slice_c_writes_resizes_and_verifies_lists_with_a_fan_out(
     assert reits.keys[:2] == (f"{reit_key}_BBB", f"{reit_key}_A")
     assert len(reits.keys) == 17 and reits.added == 1
     assert alignment.get("tbl_MinCompAperc").keys[0] == f"{min_key}_A"
-    output = tmp_path / stage_three.OUTPUT_FILENAME
+    output = tmp_path / "MACalc output.xlsb"
 
     cleared_through = stage_three.write_macalc_output(
         template, output, snapshot.layout, [], asset_rows,
