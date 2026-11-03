@@ -32,7 +32,8 @@ from zipfile import ZipFile
 if TYPE_CHECKING:
     import xlwings as xw
 
-logger = logging.getLogger(__name__)
+# Fixed name: source mode runs this module as __main__, and Stage 3 logs to a child.
+logger = logging.getLogger("bonds_lite_input")
 
 
 @dataclass
@@ -833,6 +834,10 @@ Public Sub RunBondsLite()
     LaunchBondsLite 2
 End Sub
 
+Public Sub PrepareMACalc()
+    LaunchBondsLite 3
+End Sub
+
 Private Sub LaunchBondsLite(ByVal stage As Long)
     On Error GoTo Failed
     Dim shell As Object
@@ -1094,6 +1099,10 @@ Public Sub RunBondsLite()
     LaunchBondsLite 2
 End Sub
 
+Public Sub PrepareMACalc()
+    LaunchBondsLite 3
+End Sub
+
 Public Function LocalControllerFullName(ByVal localDraft As String) As String
     Dim filesystem As Object
     Set filesystem = CreateObject("Scripting.FileSystemObject")
@@ -1295,6 +1304,9 @@ def _caller_path(caller: xw.Book) -> Path:
     if not value or re.match(r"^[a-z]+://", value, re.IGNORECASE):
         raise BondsLiteError("Save and open Draft from its local synchronised folder")
     return Path(value).expanduser().resolve()
+
+
+resolve_caller_path = _caller_path
 
 
 def portable_output_path(caller_path: Path, output_path: Path) -> str:
@@ -1556,6 +1568,9 @@ def _stage_two_cells(caller: xw.Book) -> dict[str, xw.Range]:
 def _read_stage_two_fields(caller: xw.Book) -> dict[str, object]:
     """Read the attempt identity separately from Stage 1's active handoff."""
     return {field: cell.value for field, cell in _stage_two_cells(caller).items()}
+
+
+read_stage_two_audit = _read_stage_two_fields
 
 
 def write_stage_two_audit(caller: xw.Book, fields: dict[str, object]) -> None:
@@ -2528,16 +2543,23 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--install-button", type=Path)
     parser.add_argument("--packaged", action="store_true")
+    parser.add_argument("--install-stage-three", type=Path)
     parser.add_argument("--caller")
     parser.add_argument("--caller-local", type=Path)
     parser.add_argument("--excel-hwnd", type=int)
     parser.add_argument("--pause", action="store_true", help="Wait for Enter after a run")
-    parser.add_argument("--stage", choices=("1", "2"), default="1")
+    parser.add_argument("--stage", choices=("1", "2", "3"), default="1")
     parser.add_argument("--self-test", action="store_true")
     arguments = parser.parse_args()
     if arguments.install_button:
         backup = install_button(arguments.install_button, packaged=arguments.packaged)
         logger.info(f"Button installed; original backup: {backup}")
+        return 0
+    if arguments.install_stage_three:
+        from sst_stage_three import install_stage_three_controls
+
+        backup = install_stage_three_controls(arguments.install_stage_three)
+        logger.info(f"Stage 3 controls installed; original backup: {backup}")
         return 0
     if arguments.self_test:
         import openpyxl
@@ -2582,6 +2604,14 @@ def main() -> int:
                     logger.info("Stage 2 cancelled; no model batch was run")
                 else:
                     logger.info(f"Bonds Lite model succeeded in run folder:\n{output}")
+            elif arguments.stage == "3":
+                from sst_stage_three import run_stage_three
+
+                output = run_stage_three(matches[0])
+                if output is None:
+                    logger.info("Stage 3 cancelled; no MACalc input was written")
+                else:
+                    logger.info(f"Stage 3 succeeded; MACalc input saved:\n{output}")
             else:
                 output = run_stage_one(matches[0])
                 logger.info(f"Saved Bonds Lite inputs in run folder:\n{output}")

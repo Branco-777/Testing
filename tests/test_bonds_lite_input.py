@@ -6821,7 +6821,7 @@ def test_main_stage_dispatch_keeps_default_one_and_treats_stage_two_cancellation
     assert all(reporter.joined for reporter in reporting_threads)
 
 
-@pytest.mark.parametrize("stage", ["0", "3", "two"])
+@pytest.mark.parametrize("stage", ["0", "two"])
 def test_main_rejects_invalid_stage_before_connecting_to_excel(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], stage: str,
 ) -> None:

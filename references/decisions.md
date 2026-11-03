@@ -241,3 +241,238 @@ Requirements confirmed on 27 October 2026. Implementation decisions added on 28 
 **Alternatives considered:** Keep fixed cell references (moving controls would break Stage 1); ask the user to create names manually (more error-prone and inconsistent across colleagues).
 **Rationale:** Excel carries defined names with cut/moved cells, allowing the layout to change without embedding workbook coordinates in runtime logic. Label-checked migration avoids guessing on structurally changed Drafts. Runtime path resolution still validates local ownership and scalar-cell shape.
 **Implementation evidence:** Stage 1 now resolves all three paths exclusively through the named controls; D39/D40/D42 remain only as label-checked one-time installer migration anchors. Migration preserves a complete existing moved set and rejects partial names, mismatched labels and ranges outside the local I. Control single-cell contract. Focused named-control tests passed (22); disposable installer Excel tests passed (2) and verified entered/default values and name placement. The non-Excel suite passed 664 tests, skipped 8 and retained two pre-existing failures (frozen-main test API mismatch and rollback-location capture). Release `20261102-cache-v4` passed model/controller self-tests, embedded-function parity checks and central/local copy/hash checks; both central and local pointers now select v4. The backed-up Draft contains all three names mapped to their original cells, with path values preserved. The packaged runtime can now resolve moved path controls. No Stage 1/2 financial run was performed for this change.
+## Agent-made decisions pending user approval
+
+### Decision 32: Stage 3 In A Separate Module, Delivered In Slices (2026-11-02)
+**Question:** Where should Stage 3 logic live, and how much of it should be planned and built first?
+**Decided by:** Agent (user required a separate file and asked to stop after the funded-leg transfer)
+**Choice:** Put all MACalc/MACE logic in a new `src/sst_stage_three.py`. `bonds_lite_input.py` only gains `--stage 3` dispatch, through a lazy import, and public aliases for shared helpers. Slice A covers template block validation, funded-asset detection and the MAP/MACE transfer into the funded block. Later transfers are planned as further slices.
+**Alternatives considered:** Extend `bonds_lite_input.py` (rejected by the user and adds to a 2,600-line module); plan all of Stage 3 at once (rejected because the remaining requirements are not yet supplied and the user wants Slice A verified first).
+**Rationale:** Isolates new data-transfer risk, keeps Stage 1/2 regression surface unchanged and lets each slice be verified on real data before the next.
+
+### Decision 33: Stage 3 Readiness Requires Matching Stage 2 Run Identity (2026-11-02)
+**Question:** What makes Stage 2 output valid for Stage 3?
+**Decided by:** Agent
+**Choice:** Require `SST_Stage2_Status == Succeeded` and `SST_Stage2_InputRun` to equal the current committed Stage 1 handoff. Read `Bonds Lite input_MAP.xlsx` from that run folder using cached values.
+**Alternatives considered:** Status alone (a new Stage 1 run would be paired with old Stage 2 results); the model's `JRL MAP/` input copy (it is a model artifact, not the Stage 1 handoff contract).
+**Rationale:** Follows the readiness rule already set in plan-stage-two Step 8.
+
+### Decision 34: Exact Header Contract And Exact-Equality Read-Back (2026-11-02)
+**Question:** How should Stage 3 guard against data-transfer errors?
+**Decided by:** Agent
+**Choice:**
+- Verify every source and destination header at its expected column letter and stop on any drift.
+- Reject blank, error and non-numeric values in numeric fields, and missing or duplicate ISINs.
+- Write values only.
+- Reopen the saved output and require exact equality for every copied cell, plus exact `-1` negation for PV, before recording success.
+**Alternatives considered:** Remap columns by header (silently hides template changes); tolerance-based comparison (not appropriate for pure copies); trust the write without read-back (cannot detect partial or misaligned writes).
+**Rationale:** The user flagged data transfer as the main risk. A fail-closed design with verification is consistent with Decisions 18 and 26.
+
+### Decision 35: Provisional Defaults For Unconfirmed Slice A Details (2026-11-02)
+**Question:** How should the plan proceed while some layout and output details are unconfirmed?
+**Decided by:** Agent
+**Choice:** Record provisional defaults P1-P15 in `references/plan-stage-three.md` and mark them PENDING. Five of them (cashflow vector, placement below ILS, columns A:C, output location/format, zero-funded case) block their implementation step until the user confirms.
+**Alternatives considered:** Withhold the plan until every question is answered (delays review of the overall design); implement on assumptions (rejected by the 2 November handoff).
+**Rationale:** Lets the user review and amend the whole design in one pass while preventing unconfirmed choices from reaching code.
+### Decision 36: Stage 3 Slice A Answers (2026-11-02)
+**Question:** Which cashflows go into the funded block, how are funded assets identified, and how should placement, columns A:C, output location and the zero-funded case work?
+**Decided by:** User
+**Choice:**
+- Funded-leg cashflows (MACalc N:ATQ) come from MACE `C. Assets - Funding` AJ:AUM, not MAP Q:ATT.
+- A funded asset has an all-negative MACE funding-leg vector. With zero tails after maturity, this is implemented as at least one negative month and no positive month.
+- Rows below the funded block are cleared for later slices.
+- A:C on funded rows are left empty; they will be filled later from another MACE tab.
+- Interim outputs for all stages are saved in the timestamped Stage 1 run folder.
+- Zero funded assets produces a warning and the run continues; it is not an error.
+**Alternatives considered:** Full MAP vector (the user's original specification, withdrawn because it includes the asset leg's positive months and differs from MACE by up to 19.8m); copied allocation formulas in A:B (rejected by the user); stop on zero funded (rejected because other entities may legitimately have none).
+**Rationale:** MACE holds the funding leg directly. Read-only checks on 2 November found exactly 5 negative-only rows of 1,009, with the rest all zero, matching the 5 MAP assets with negative months.
+
+### Decision 37: Fail-Closed Funding-Vector And Reconciliation Guards (2026-11-02)
+**Question:** What should happen when MACE funding vectors are unusual, or MACE and MAP disagree on which assets are funded?
+**Decided by:** User
+**Choice:**
+- Stop on any MACE funding vector with positive months (mixed sign or positive-only).
+- Stop if the MACE-funded set differs from the MAP set of assets with any negative month, listing the differences.
+- Both empty is the zero-funded warning case, not an error.
+**Alternatives considered:** Ignore anomalous rows (could silently drop or misclassify a funding leg); trust MACE alone (would not detect MACE and Stage 1 data from different dates or portfolios).
+**Rationale:** Both checks pass on current data and protect the main data-transfer risk the user raised. The user approved both checks on 2 November 2026.
+
+### Decision 38: Preserve Excel State And External Links In MACalc Output (2026-11-02)
+**Question:** How should the Stage 3 writer handle Excel application startup and workbook links when saving a staged MACalc copy?
+**Decided by:** Agent (implementation detail within the user's approved Stage 3 implementation)
+**Choice:**
+- Start the owned hidden Excel application with a workbook open before setting application properties; an empty instance returned invalid values and rejected the `CalculateBeforeSave` setter.
+- After Excel saves the staged copy, restore and verify the template's external-link targets before read-back validation. Excel rewrites SharePoint URL targets to UNC paths even when protected formula bodies and cached values are unchanged.
+- Keep exact protected-formula checks; do not weaken validation to ignore link-path changes.
+**Alternatives considered:** Set properties on an empty Excel instance (reproduced COM failure); accept Excel's rewritten link targets (changes workbook state); weaken protected-row comparisons (masks unintended edits).
+**Rationale:** These safeguards were derived from failures reproduced in disposable Excel runs. The final disposable real-input output passed exact read-back, retained all 9 external-link targets and left the source template hash unchanged. No live Draft or Stage 3 orchestration was involved.
+
+### Decision 39: Stage 3 Controls Mirror Stage 2 And Survive Launcher Reinstalls (2026-11-02)
+**Question:** How should the requested Stage 3 button and audit panel be installed?
+**Decided by:** User (requested the same style as previous stages); placement details by Agent
+**Choice:**
+- Use a blue 11-row panel `SST_Stage3_Panel`, with the same fields and formats as Stage 2, placed below the Stage 2 controls.
+- Use a `btnPrepareMACalc` button placed by the Stage 2 rule: beside the panel when a 205pt button fits, otherwise below.
+- Add `PrepareMACalc` to both the source and packaged launcher texts, so a Stage 1/2 reinstall cannot remove it.
+- Install with `--install-stage-three`, after an automatic backup.
+**Alternatives considered:**
+- Append the macro only during Stage 3 installation. Rejected: Stage 1/2 reinstalls rewrite the module and would drop it.
+- Always place the button below the panel. Rejected: inconsistent with Stage 2.
+**Rationale:** The panel and button stay consistent with Stages 1 and 2, and the install is idempotent. Live installation was verified against the backup.
+
+### Decision 40: Stage 3 Slice A Accepted (2026-11-03)
+**Question:** Does the first live Stage 3 output match the user's expectation, so that Slice A can be closed and the remaining slices planned?
+**Decided by:** User
+**Choice:** Accept Slice A. The user compared the five funded rows in `Bonds Lite output/20261102_111001/MACalc input.xlsb` (Stage 2 summary `bonds_batch_summary_20261103_093358.csv`) and confirmed they look correct. The remaining Stage 3 transfers will be planned as new slices in a new session.
+**Alternatives considered:** Hold Slice A open for a golden-fixture acceptance test against a hand-built MACalc (not requested; can still be added later).
+**Rationale:** The orchestrator's exact read-back passed and the user's own check agrees, so later slices can build on the Slice A output layout.
+
+### Decision 41: Stage 3 Slice B Requirements And Single-Run Delivery (2026-11-03)
+**Question:** How is the rest of MACalc `I. Assets` populated after the funded block, and how does Slice B relate to Slice A?
+**Decided by:** User
+**Choice:**
+- Copy the Stage 2 MAP output whose name contains `py_bonds_Base_Scenario_nozeros` into the rows directly below the funded block. The mapping is B→D, A→E, D×10000→F, F→H, I→I, E→K and J:ATN→M:ATQ. The substring must be easy to change.
+- Fill Type (G), Index Linked? (J) and FSAO (L) from MACE `I. Bonds`, and A:C from the MACE `Control` K:O table (Comp. A %→A, Comp. B %→B, Partial CF Flag→C; Comp. C % ignored), both matched on MACalc Name (E).
+- Stop and list the ISINs on unmatched or duplicate keys, blanks or errors. Stop if the `Control` table is not contained in K:O.
+- Slices A and B run as one process. Commit and the v5 release wait until Slice C is accepted.
+**Alternatives considered:** A separate Slice B button or run (rejected by the user: the split exists only for development).
+**Rationale:** These are the user's stated requirements. The details are in `plan-stage-three.md`, section "Slice B".
+
+### Decision 42: Slice B Interpretations And Provisional Defaults (2026-11-03)
+**Question:** How should details that the requirements leave open, or that conflict with the live files, be handled?
+**Decided by:** Agent (pending user approval)
+**Choice:**
+- Match on `I. Bonds` column D (ISIN), not E (company name).
+- In `Control`, use K as the ISIN key, because the live headers put ISIN in K and Comp. A % in L.
+- Define containment within K:O as the header contract plus no data in P:Z and no second block below the gap.
+- Provisional defaults Q-B1 to Q-B6:
+  - Q-B1: fill A:C on the funded rows too.
+  - Q-B2: look for the CSV only in the MAP subfolder, with the substring held as a code constant.
+  - Q-B3: ignore MACE rows that are not in the CSV.
+  - Q-B4: stop if the CSV and MAP sets differ or the valuation dates differ; warn only on a PV difference.
+  - Q-B5: copy the Partial CF Flag exactly.
+  - Q-B6: keep CSV order and clear the rows below.
+**Alternatives considered:**
+- `I. Bonds` E as the key: company names are not unique and do not match the ISINs.
+- `Control` L as the key: L holds Comp. A %, not the ISIN.
+- A Draft named cell for the substring: avoids a code release, but adds Draft surface and audit risk.
+- Stopping on any MACE extra: today the only extras are Inf_swap rows.
+**Rationale:** Read-only checks on handoff `20261102_111001` show D and K are the unique ISIN columns, covering all 988 CSV ISINs. The defaults mirror the fail-closed guards approved for Slice A (Decision 37).
+
+### Decision 43: Slice B Open Points Confirmed (2026-11-03)
+**Question:** Which provisional Slice B defaults (Q-B1 to Q-B6) does the user accept?
+**Decided by:** User
+**Choice:**
+- **Q-B1:** A:C are filled on every post-ILS row, funded rows included, from the MACE `Control` table. This supersedes P2.
+- **Q-B2:** Look for the CSV only in the entity's MAP output folder from Stage 2 (the validated `output_folder_path`). The substring stays a code constant.
+- **Q-B3:** MACE rows that are not in the CSV are allowed. A CSV asset that is not in MACE stops the run.
+- **Q-B4:**
+  - Warn, without stopping, if the CSV assets differ from the Stage 1 MAP assets.
+  - Stop if the valuation dates of MACE and the Draft differ.
+  - Do not compare CSV PV with MACE PV.
+- **Q-B5:** Copy the Partial CF Flags exactly.
+- **Q-B6:** Write in CSV order and verify that nothing remains below the last asset row. Slice C does not touch `I. Assets`.
+- The user's reply did not address the Decision 42 interpretations (`I. Bonds` key D, `Control` key K, K:O containment rule). They stay **pending explicit confirmation** and are not accepted by silence.
+**Alternatives considered:** The agent's defaults in Decision 42. The user changed Q-B4 from stop to warn for the CSV/MAP set difference and dropped the PV cross-check.
+**Rationale:** These are the user's answers. They are recorded in `plan-stage-three.md`, under "Slice B, Confirmed Answers".
+
+### Decision 44: Slice B Matching Keys And K:O Containment Confirmed (2026-11-03)
+**Question:** Are the Decision 42 interpretations (I1-I3) correct?
+**Decided by:** User
+**Choice:**
+- I1: match MACalc Name (E) against MACE `I. Bonds` column D (ISIN).
+- I2: the MACE `Control` key is column K (ISIN), mapping L → A, M → B and O → C.
+- I3: "contained in K:O" means the exact row-9 headers, no data in P:Z beside the table, and no second K block within 50 rows below the first blank. *(Amended by Decision 48: the side check now covers column P only.)*
+**Alternatives considered:** `I. Bonds` E and `Control` L as keys (they hold company names and Comp. A % respectively).
+**Rationale:** The user confirmed all three on 3 November 2026. The user also asked for a check that MACalc copes with `tbl_Assets` growing beyond the template's 1,008 rows; its result is recorded in the plan's Slice B risks.
+
+### Decision 45: Rating-Suffixed ISIN In Column D; Slice C Aligns MACalc ISIN Lists (2026-11-03)
+**Question:** The template held the plain ISIN in D, and MACalc joins D to `tbl_ForcedCompAperc`, `tbl_MinCompAperc` and `lst_pre16assets`. Should Slice B write `Unique_ISIN` or the plain ISIN to D, and what goes in E?
+**Decided by:** User
+**Choice:** Option (b): `Unique_ISIN` → D and the CSV `ISIN` → E, as originally specified. Funded rows keep the plain ISIN in D, so they are deliberately distinct from their rating-suffixed counterparts. E is also usable as a matching key. Aligning the three MACalc ISIN lists is the scope of Slice C.
+**Alternatives considered:** (a) plain ISIN in D, as in the template. Rejected: funded and non-funded rows would share a D value, and the user intends rating-suffixed identifiers.
+**Rationale:** This is the user's intended identifier scheme. Until Slice C is done, the interim output must not be used for optimisation runs.
+
+### Decision 46: Guard MACalc's `tbl_Assets` Assumptions (2026-11-03)
+**Question:** Will MACalc cope with `tbl_Assets` growing from 1,008 to 1,013 rows, and what must hold for it to read the assets correctly?
+**Decided by:** Agent (from the user-requested check of `MACalc.py`)
+**Choice:**
+- Row growth is safe, because MACalc sizes everything from `len(df_assets)`.
+- Before saving, stop if any column A cell in rows 2 to the last asset row is blank: `tbl_Assets` is sized by COUNTA over A.
+- Stop if any G value is outside `Mortgage`, `Bond`, `Infrastructure`, `PP`, `Swap` or `ILS`: MACalc asserts that its asset groups sum to the total.
+**Alternatives considered:** Rely on MACalc's own assertion. Rejected: it fails only at MACalc run time and does not catch a blank A, which silently truncates the table.
+**Rationale:** Both conditions silently or late-failingly break MACalc, and both are cheap to check in Stage 3.
+
+### Decision 47: Slice B Implementation Deviations (2026-11-03)
+**Question:** Where did the Slice B implementation have to depart from the plan's wording?
+**Decided by:** Agent; approved by the user on 3 November 2026. On point 1, the user asked whether pandas should be added to the packaged controller for speed. It was kept out: the CSV read takes 0.23 s of the 112 s live run, which is mostly Excel work (opening MACE over the network alone took about 27 s). Importing pandas takes about 0.7 s, and the build excludes pandas and numpy from the controller behind every stage button (`tools/build_packaged_stages.py`).
+**Choice:**
+- Read the base-scenario CSV with the standard-library `csv` module.
+- Test the MACE readers with fake sheets and pure parsers.
+- Return dataclasses that carry duplicate keys, and a `SliceBReconciliation` result object.
+- Fix the Slice A rollback so a failure never deletes the previous output.
+**Alternatives considered:** pandas (rejected: excluded from the packaged controller, so the frozen build would fail); generated `.xlsx` fixtures (rejected: slower and needs Excel or openpyxl formatting fidelity for no extra coverage of the parsing logic); leaving the rollback as is (rejected: the new Slice B guard test requires the previous output to survive).
+**Rationale:** Keeps Stage 3 runnable in the packaged build, keeps the tests fast, and makes the "keep previous output" guarantee true.
+
+### Decision 48: K:O Containment Checks Column P Only (2026-11-03)
+**Question:** The live MACE `Control` sheet has other panels in Q, R, T and U (rows 9-31), so the confirmed I3 rule ("no data in P:Z") stops every live run. What should the side check cover?
+**Decided by:** User
+**Choice:** Option (b): only column P, from row 9 to the last table row, must be empty (`CONTROL_SIDE_COLUMNS = ("P", "P")`). The exact row-9 header check and the "no second K block within 50 rows below the gap" check are unchanged. This amends I3 in Decisions 42 and 44.
+**Alternatives considered:** (a) keep P:Z and move the MACE panels: rejected, because the panels are a normal part of the MACE workbook. (c) a different range: not needed, because P is the only column between the table and the other panels.
+**Rationale:** P still catches a table that has grown sideways (for example a new "Comp. D %" column), while the user confirmed that the columns from Q onwards are expected to hold data.
+
+### Decision 49: Slice C Mapping Rule And Defaults (2026-11-03)
+**Question:** How should each entry of `tbl_ForcedCompAperc`, `tbl_MinCompAperc` and `lst_pre16assets` map to the new `I. Assets` D values, and what happens to unmatched entries, multiple matches and duplicates?
+**Decided by:** Agent (pending user approval)
+**Choice:**
+- C1: for each entry `k`, the matching row set `M(k)` is {rows 2..last with D = `k`} ∪ {asset-block rows with E = `k`}. Emit the D of every row in `M(k)`, in `I. Assets` row order, at `k`'s position, with `k`'s value unchanged. Matching is exact. E is not used for Mortgage/ILS rows.
+- An asset row is reached through E only when its D is exactly `E_<its own rating>`. If no row is suffixed, the lists are written back unchanged. Any other D/E shape stops the run (Guard 7). **User-confirmed 3 Nov (Q-C3).**
+- C2: |M| = 0 means the entry stays in place, unchanged, with a console count. **User-confirmed 3 Nov (Q-C4).**
+- C3: |M| ≥ 2 (a funded plain ISIN that is also an asset E, and/or several asset rows sharing one E, such as the same ISIN at two ratings) fans out to one entry per matching row, in row order, contiguously and with the same value. The fan-out is reported on the console and does not stop the run. Added = |M| − 1. If a fan-out collides with another entry's key, the run stops for a table, and the duplicate is silently removed for a membership list. There are zero cases today.
+- C4/C5: original order, values copied exactly, and the block is rewritten from row 7 with the old tail cleared.
+- C6: no fuzzy matching.
+- Stops: title, name-formula or containment drift; blank or error keys; non-numeric or out-of-[0,1] values; an asset row whose D is neither E nor `E_<rating>` (Guard 7); duplicate source or remapped keys **in the two tables** (the default, pending the user's choice between a, b and c in Q-C5).
+- Membership lists (`lst_pre16assets`, `lst_REITs`): duplicates (in the source or from a fan-out) are removed silently, keeping the first occurrence. **User-decided 3 Nov (Q-C5).**
+- Slice C runs inside the existing single write, save, verify and audit.
+**Alternatives considered:**
+- Match on the ISIN prefix of D (fuzzy; could hit the wrong row, and it is not how MACalc joins).
+- Drop stale entries (changes template content for no model effect).
+- Emit only the `Unique_ISIN` for funded overlaps (silently drops the restriction from the funded leg).
+- Stop the run on any multi-match. This is safe but would block a valid quarter in which one ISIN is held at two ratings, a case the rating suffix exists to support.
+- Pick one row for a multi-match (first, or highest rating). This is arbitrary, and it silently leaves the other legs unrestricted.
+- Write formulas linked to `I. Assets` (MACalc reads values; adds recalculation dependence).
+**Rationale:** Discovery on handoff `20261102_111001` shows that this rule restores exactly the template's match counts (Forced 24, Min 106, Pre16 31, REITs 16). MACalc's left-merge makes duplicate keys a silent misalignment risk, so they stop the run.
+**Superseded by:** Decision 52 — same-value duplicates in the Comp A tables are removed; only conflicting values stop the run.
+
+### Decision 50: Include `lst_REITs` In Slice C (2026-11-03)
+**Question:** The brief names three lists, but `calcSCR.py` (`v_3_3`, lines 32-40) also matches `lst_REITs` against `I. Assets` D, to reclassify REITs as Financial for the SCR. Should Slice C align it?
+**Decided by:** User, 3 November 2026 (Q-C1 include; Q-C2 leave `lst_noPRoC`, verify unchanged). Subject to re-check in step C0 (Decision 51)
+**Choice:** Include `lst_REITs` (`P. Parameters` M7:M22, 16 entries, all remapped via E) under the same rule as Decision 49. Leave `lst_noPRoC` unchanged: it holds the 8 Inf_swap D values, which Stage 3 never changes, and `v_3_3` does not read it.
+**Alternatives considered:** Restrict Slice C to the three named lists (16 REITs would be treated as non-financial in every MACalc run, which misstates the SCR).
+**Rationale:** The impact goes beyond optimisation runs, and the change uses the same mechanism at negligible cost.
+
+### Decision 51: Slice C Reference Model Is The New Python MACalc (2026-11-03)
+**Question:** Q-C6. Is `MACalc.py` in `v_3_3` the right reference for how the MACalc output's ISIN lists are used?
+**Decided by:** User
+**Choice:** No. The output will feed the Python MACalc in `C:\Users\Joao Branco\OneDrive - Just Group\Financial Resilience Team - General\00 Ad Hoc\MACalc_Batch`, Stage 5 is the run of that model on the MACalc input once Stage 3 has validated it. That model is not read, changed or run in Stage 3. Slice C is specified against the template's contract: the lists keyed on `I. Assets` D, with an exact match. Before Stage 5's first run, its planning also confirms the join, the list set and the duplicate-key behaviour, and any gap reopens Slice C.
+**Alternatives considered:** (a) Read the new model now and block Slice C on it. Rejected by the user: no work on that model before Stage 5. (b) Treat `v_3_3` as authoritative. Rejected, because it is not the consuming model.
+**Rationale:** This keeps Stage 3 independent of Stage 5, and the template contract is the interface that both must honour.
+
+### Decision 52: Slice C Duplicate Handling And Plan Approval (2026-11-03)
+**Question:** How should Slice C handle duplicate keys in the Comp A tables, and is the Slice C plan approved?
+**Decided by:** User
+**Choice:** Approve the Slice C plan. In `tbl_ForcedCompAperc` and `tbl_MinCompAperc`, silently remove duplicate keys with identical values, keeping the first occurrence; stop and report the key and all values if a duplicate key has conflicting values. In `lst_pre16assets` and `lst_REITs`, silently remove duplicates, keeping the first occurrence. This applies to duplicates already in the source and collisions created by fan-out.
+**Alternatives considered:**
+- Stop on every table duplicate — rejected because duplicates with identical values do not create an allocation ambiguity.
+- Silently keep the first table entry regardless of value — rejected because conflicting percentages would make the intended allocation ambiguous.
+**Rationale:** Preserve an unambiguous single constraint for each key, while failing explicitly when duplicate entries disagree. The user approved the completed Slice C plan on 3 November 2026.
+### Decision 53: Guard 7 Compares D Exactly With The Row's CSV `Final_Rating` (2026-11-03, revised)
+**Question:** Plan C1 and Decision 49 define a rating-suffixed asset row as one whose D is exactly `E + "_" + <that row's own CSV rating>`, and name the field as `MapBaseRow.rating`. That field is the CSV `Final_Notched_Rating` (column I, e.g. `BBB+`), which is not the suffix Bonds Lite writes: on handoff `20261102_111001` it would stop 558 of 988 asset rows. Which of the row's CSV ratings does the approved exact rule refer to?
+**Decided by:** Agent, approved by the user on 3 November 2026 ("the suffix comes from Final_Rating"). This is a clarification of the approved rule, not a new rule.
+**Choice:** Guard 7 and the E-match compare D **exactly** with `E + "_" + Final_Rating`, where `Final_Rating` is the CSV column H value of the same row. Stage 3 now reads and header-checks CSV column H (`MapBaseRow.final_rating`) and passes it to the asset-block keys before the write and on read-back. There is no string manipulation: any other D stops the run, including the notched form (`X_BBB+`), another grade, and stray whitespace. `I. Assets` column I still receives `Final_Notched_Rating`, unchanged.
+**Evidence:** In the 111001 base-scenario CSV (988 rows), `Unique_ISIN == ISIN + "_" + Final_Rating` on all 988 rows; with `Final_Notched_Rating` it holds on only 430. The plan's own discovery ("`D == E + "_" + rating` on every row, with ratings GOV, AAA, AA, A, BBB, BB and B") describes `Final_Rating`, not the notched field.
+**Alternatives considered:**
+- Literal `Final_Notched_Rating` (the field named in the plan). Rejected: it contradicts the plan's verified discovery and would stop every live run.
+- Strip `+`/`-` from the notched rating (the first version of this decision). Withdrawn: it derives the suffix heuristically rather than comparing exactly with a CSV field, which is what the approved rule asks for.
+- Accept any grade from a fixed set. Rejected: it no longer ties the suffix to the row's own rating.
+**Rationale:** Exact equality with the row's own CSV rating field is the approved rule; `Final_Rating` is the only CSV field for which the plan's discovery holds. Reverse it by changing the field read into `MapBaseRow.final_rating`.

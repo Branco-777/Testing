@@ -105,6 +105,70 @@ The supplied source was rescanned as B8:ATT1066, or 1,058 bond rows; the supplie
 
 The workflow generates two workbooks using all credit blocks, regardless of scenario toggles. Date, entity and stresses are captured once, so both outputs use the same settings even if controls are subsequently edited. Stage 2 executes the Bonds Lite model only after a saved Stage 1 handoff is validated. Entity must be nonempty Windows-safe text with no surrounding whitespace because it is used unchanged in directory names.
 
+## Stage 3 Audit And MACalc Input
+
+Click **Prepare MACalc** on I. Control (around row 100). It runs only when Stage 2 has succeeded on the current Stage 1 handoff. It then writes `MACalc input.xlsb` into that same timestamped run folder.
+
+The blue panel `SST_Stage3_Panel` beside the button records the following:
+- Last Run, Start, Finish, Time and User;
+- Status (it starts as Not Run);
+- Input Run;
+- Last Successful Output.
+
+Like the Stage 1/2 panels, it can be moved with Cut/Paste. To reinstall the controls, close Draft and run `python -m bonds_lite_input --install-stage-three "Draft Input spreadsheet for SST.xlsm"` from `src`. The command backs up the Draft first.
+
+### What Stage 3 writes
+
+One run writes one `I. Assets` sheet. The template's Mortgage/ILS rows (2-20) are kept. After them come two blocks:
+- the **funded block**: one row per funded ISIN, from MAP and the MACE `C. Assets - Funding` tab;
+- the **asset block**: one row per row of the Stage 2 base-scenario CSV, in CSV order.
+
+Every post-ILS row takes A:C (Comp. A %, Comp. B %, Partial CF Flag) from MACE `Control` K:O. Asset rows take Type, Index Linked? and FSAO from MACE `I. Bonds`, and everything else from the CSV. Zspread is ×10000. Nothing is left below the last asset row.
+
+The CSV is the single file in `<run folder>\<entity> MAP\` whose name contains `py_bonds_Base_Scenario_nozeros`. If a Bonds Lite model update renames it, change `MAP_BASE_OUTPUT_PATTERN` in `src/sst_stage_three.py`.
+
+The run stops before writing anything, and the previous `MACalc input.xlsb` is kept, when any of the following occurs:
+- no CSV or several matching CSVs are found, or the CSV headers or values are invalid;
+- a CSV or funded ISIN is missing or duplicated in MACE `I. Bonds` (column D) or `Control` (column K), or has an invalid Type, Index Linked?, FSAO, Comp. A %, Comp. B % or Partial CF Flag (all offending ISINs are listed in one message);
+- MACE `Control!C9` differs from the Draft `I_Valuation_Date`;
+- the `Control` table is not contained within K:O;
+- a post-ILS row would have a blank column A, or a Type MACalc does not recognise;
+- an ISIN list check fails (see below).
+
+If the CSV and MAP ISIN sets differ, Stage 3 still succeeds and shows a warning that lists the differences. MACE rows that are not in the CSV are ignored and counted in the console.
+
+### ISIN List Alignment
+
+MACalc matches four template lists against `I. Assets` column D, which now holds the rating-suffixed `Unique_ISIN`. In the same run, Stage 3 rewrites the key column of each list so that it matches column D:
+
+| Name | Sheet | Columns | Content |
+| --- | --- | --- | --- |
+| `tbl_ForcedCompAperc` | `I. Inputs` | H:I | key, forced Comp A % |
+| `tbl_MinCompAperc` | `I. Inputs` | K:L | key, minimum Comp A % |
+| `lst_pre16assets` | `P. Parameters` | K | key |
+| `lst_REITs` | `P. Parameters` | M | key |
+
+`lst_noPRoC` and `I. Assets` are not changed. The read-back proves that every other cell on both sheets equals the template.
+
+For each list entry:
+- An entry that already equals a D value (a Mortgage `Note`, an `Inf_swap_…` row or a funded plain ISIN) is **kept**.
+- An entry that equals the plain ISIN (E) of a rating-suffixed asset row is **remapped** to that row's D. The value is copied exactly. An asset row is rating-suffixed when D is exactly E + `_` + the row's CSV `Final_Rating` (column H of the base-scenario CSV), for example `X_BBB` for a row whose `Final_Rating` is `BBB` (its notched rating in column I may be `BBB+`).
+- An entry that matches several rows (a funded ISIN that is also an asset, or one ISIN at two ratings) is **fanned out**: one entry per row, in `I. Assets` row order, at the entry's position, with the same value.
+- An entry that matches nothing stays in place **unmatched**, as it was already unmatched in the template.
+- When no asset row is suffixed, the lists are left as they are.
+- Duplicate keys, whether in the template or created by a fan-out, keep their first occurrence. In the two Comp A tables, a duplicate key with a different value stops the run.
+
+The console prints one line per list, for example `tbl_MinCompAperc: kept 0, remapped 106, unmatched 58, added 0, duplicates removed 0`. It also prints the unmatched keys when there are 50 or fewer, and each fan-out.
+
+An ISIN list check stops the run before anything is written, and keeps the previous output, when any of the following occurs:
+- `The MACalc template ISIN lists failed validation`: a title (row 5) has changed, row 6 is not blank, a cell above the title is used, a key sits below a blank key, data appears beside or below a list, or a name is no longer the expected `OFFSET(…COUNTA…)` formula;
+- `Stage 3 could not align the MACalc ISIN lists`: a key is blank, an error or not text; a Comp A value is blank, an error, non-numeric or outside 0 to 1; a Comp A duplicate has conflicting values; or an asset row's D is neither its E nor exactly E + `_` + its CSV `Final_Rating`;
+- `MACalc ISIN list read-back failed`: the saved lists, their names or the other cells on `I. Inputs`/`P. Parameters` differ from what was expected.
+
+Before Stage 5 (the Python MACalc run in `MACalc_Batch`) is first used on this output, its planning must confirm that the model reads these lists by the same names and joins them to column D by exact match.
+
+The packaged button needs a controller release that includes Stage 3 (v5 or later). Release v4 rejects `--stage 3`.
+
 ## Stage 2 Audit And Results
 
 Stage 2 has its own movable panel and does not change `SST_Stage2_Input`, the active Stage 1 handoff. Its Input Run records the captured relative run folder; Last Successful Results is set only after both batch rows, required files, unchanged input hashes and the saved success audit pass. A later Stage 1 run does not make an older Stage 2 result current; readiness compares both run identities.

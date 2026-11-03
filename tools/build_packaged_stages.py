@@ -47,6 +47,7 @@ def pyinstaller_command(
         "--distpath", str(dist), "--workpath", str(work),
         "--specpath", str(spec), "--paths", str(project / "src"),
         "--hidden-import", "pythoncom", "--hidden-import", "pywintypes",
+        "--hidden-import", "sst_stage_three",
         "--exclude-module", "matplotlib", "--exclude-module", "IPython",
         "--exclude-module", "notebook", "--exclude-module", "tkinter",
     ]
