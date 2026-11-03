@@ -47,7 +47,6 @@ def pyinstaller_command(
         "--distpath", str(dist), "--workpath", str(work),
         "--specpath", str(spec), "--paths", str(project / "src"),
         "--hidden-import", "pythoncom", "--hidden-import", "pywintypes",
-        "--hidden-import", "sst_stage_three",
         "--exclude-module", "matplotlib", "--exclude-module", "IPython",
         "--exclude-module", "notebook", "--exclude-module", "tkinter",
     ]
@@ -59,6 +58,7 @@ def pyinstaller_command(
             "--add-data", f"{model / 'pyBondsHMutils.py'}{os.pathsep}.",
         ]
     else:
+        options += ["--hidden-import", "sst_stage_three"]
         for module in ("scipy", "numba", "llvmlite", "pandas", "numpy"):
             options += ["--exclude-module", module]
     return options + [str(entry)]

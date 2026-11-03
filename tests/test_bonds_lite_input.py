@@ -1426,6 +1426,26 @@ def test_packaged_builder_publishes_versioned_central_copy_source(
     assert (release_root / "current.txt").read_bytes() == b"test-local-cache-source"
 
 
+def test_pyinstaller_command_hidden_imports_stage_three_in_controller_only(
+    tmp_path: Path,
+) -> None:
+    from tools import build_packaged_stages as builder
+
+    def hidden_imports(model: Path | None) -> set[str]:
+        command = builder.pyinstaller_command(
+            Path("python.exe"), Path("entry.py"), "App", tmp_path / "dist",
+            tmp_path / "work", tmp_path / "spec", tmp_path, model=model,
+        )
+        return {
+            command[index + 1]
+            for index, option in enumerate(command[:-1])
+            if option == "--hidden-import"
+        }
+
+    assert "sst_stage_three" in hidden_imports(None)
+    assert "sst_stage_three" not in hidden_imports(tmp_path / "model")
+
+
 @pytest.mark.excel
 @pytest.mark.skipif(
     os.environ.get("BONDS_LITE_RUN_STAGE_PANEL_EXCEL_TESTS") != "1",
