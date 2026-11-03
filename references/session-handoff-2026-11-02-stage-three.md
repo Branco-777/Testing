@@ -1,16 +1,59 @@
 # Session Handoff: Stage 3 MACalc Input (2 November 2026, updated 3 November 2026)
 
-Read this file together with `references/plan-stage-three.md` (v0.11), which is
+Read this file together with `references/plan-stage-three.md` (v0.12), which is
 the authoritative Stage 3 plan. Decisions are in `references/decisions.md`
-(Decisions 32-53). The earlier handoff `references/session-handoff-2026-11-02.md`
+(Decisions 32-54; 54 is proposed). The earlier handoff `references/session-handoff-2026-11-02.md`
 covers Stages 1 and 2.
 
-## Current Status (3 November 2026, 14:55)
+## Next Session: Implement Slice D (Unique MACalc Input Filename)
+
+The user's request (3 November 2026): `MACalc_Batch` (Stage 4) needs the MACalc
+input workbook to be uniquely named across synced SharePoint folders, so
+Stage 3 should add a unique suffix to the name. The plan is in
+`references/plan-stage-three.md`, section "Slice D: Unique MACalc Input
+Filename" (steps D0-D6). The proposal (Decision 54, pending) is
+`MACalc input_<Stage 1 run ID>_<token>.xlsb`, for example
+`MACalc input_20261103_161318_3f9c2a7be104d65e.xlsb`, with a fresh
+16-character random token on every run. The run ID alone is not enough: it is
+unique only within one output root, so two Drafts starting Stage 1 in the same
+second, or a copied run folder, would clash. Because the name changes on every
+run, earlier outputs are kept until the new one is verified and audited, then
+deleted, and Stage 4 must read the path from `SST_Stage3_LastSuccessfulOutput`.
+
+Start the session by:
+1. Committing the pending v6 build fix and release notes (D0; see Outstanding).
+2. Asking the user Q-D1 to Q-D4 from the plan:
+   - Q-D1: any naming rule in `MACalc_Batch` (spaces, pattern, length), and is
+     a 16-character token acceptable or is a full UUID preferred?
+   - Q-D2: delete earlier tokenised outputs after a successful rerun?
+   - Q-D3: does `MACalc_Batch` ignore the dot-prefixed staged file?
+   - Q-D4: leave legacy `MACalc input.xlsb` files in place?
+
+   Then record Decision 54 as approved or changed.
+3. Following D1-D6 with tests first. Only `src/sst_stage_three.py` and its
+   tests change. Then build and promote v7 with approval, have the user test
+   Stages 1-3, and commit.
+
+Do not inspect, change or run `MACalc_Batch` (Decision 51).
+
+## Current Status (3 November 2026, 16:45)
 
 - **Slice A:** implemented, run on live data and accepted by the user (Decision 40).
 - **Slice B:** implemented (steps B1-B7), run live in source mode on handoff `20261102_111001` and **accepted by the user on 3 November 2026**. The run took 112 s and produced 5 funded rows (21-25) and 988 asset rows (26-1013), with A:C filled from MACE `Control` and nothing below row 1013. Decision 47 (implementation departures, including the standard-library CSV reader without pandas) and Decision 48 (the K:O side check covers column P only, because MACE has other panels from Q onwards) are approved. Tests: 797 passed, 84 skipped and the 2 known failures.
 - **Slice C implemented on 3 November** (steps C0-C7, plan v0.11, "Addendum: Slice C Implementation Progress"; Decisions 49-53 approved; **accepted by the user on 3 November 2026**). In the same single run, Stage 3 now realigns `tbl_ForcedCompAperc`, `tbl_MinCompAperc`, `lst_pre16assets` and `lst_REITs` with the rating-suffixed column D, in the same staged book, with one save, one read-back and one audit. `I. Assets` and `lst_noPRoC` are untouched. Decision 53 (a clarification, approved by the user): the row's "own CSV rating" in the approved exact rule is the CSV `Final_Rating` (column H), which is the `Unique_ISIN` suffix on all 988 rows of 111001; `I. Assets` column I holds the notched rating and is not used for the suffix. Guard 7 accepts D = E or D = E + "_" + `Final_Rating` exactly, and nothing else. **Live source-mode run on `20261102_111001` succeeded on 3 November (109 s)** with the expected plan C6 summary (Forced 19/5/0/0, Min 0/106/58/0, Pre16 0/31/291/0, REITs 0/16/0/0 kept/remapped/unmatched/added; no duplicates or fan-outs). A one-line logger fix in `bonds_lite_input.py` was needed so that the summary shows in source mode (plan addendum deviation 5). The user spot-checked the output and accepted Slice C. All 4 opt-in Excel tests pass.
-- **Commit and the v5 release:** all three slices are accepted; both still need the user's explicit go-ahead.
+- **Committed and released.** Slices A-C were committed in `0f6ef09` (after
+  `85cbe07`, the Stage 1/2 handoff). Release `20261103-cache-v6` is **live**
+  (central `current.txt`); the user's local cache is also on v6.
+  - The user ran Stages 1-3 with the packaged release on handoff
+    `20261103_161318` and reported that everything works.
+  - `20261103-cache-v5` is on the share but was never promoted, because its
+    model bundled the Stage 3 modules by mistake.
+  - The fix makes the hidden import controller-only. It is in
+    `tools/build_packaged_stages.py`, with the regression test
+    `test_pyinstaller_command_hidden_imports_stage_three_in_controller_only`
+    in `tests/test_bonds_lite_input.py`, and is **not yet committed**.
+  - Details are in the plan's "Commit and release" note.
+- **Slice D planned** (unique MACalc input filename for Stage 4); see "Next Session" above.
 
 Key points from Slice B (full detail in the plan):
 
@@ -62,11 +105,12 @@ requirements at the start of that session.
 - Rows below the funded block are cleared.
 - Zero funded assets: warn and continue (not an error).
 - Anomalous MACE vectors or MAP/MACE set differences: stop and report.
-- Output `MACalc input.xlsb` is saved in the timestamped Stage 1 run folder.
+- Output `MACalc input.xlsb` is saved in the timestamped Stage 1 run folder
+  (Slice D will rename it to `MACalc input_<run ID>_<token>.xlsb`).
 - Stage 3 lives in its own module, `src/sst_stage_three.py`, and requires a
   validated Stage 2 run on the **same** Stage 1 handoff.
 
-## Implemented (all uncommitted)
+## Implemented (committed in `0f6ef09`)
 
 - `src/sst_stage_three.py` (new): validation, reads, reconciliation, writer
   with read-back verification, external-link restoration, audit, guard,
@@ -124,19 +168,28 @@ requirements at the start of that session.
 
 ## Outstanding
 
-1. **Slice C accepted** on 3 November 2026 (Decision 53 approved). Optionally
-   delete the leftover staged files `.MACalc-stage3-*.xlsb` in
-   `Bonds Lite output/20261102_111001/`.
-2. **Commit** on the user's go-ahead (Slices A, B and C are accepted; use Supir Commit; conventional commit with the
-   Co-authored-by trailer). Not yet committed. Do not commit `__pycache__`,
-   `.pytest_cache`, `Bonds Lite output/`, backups, or the `.xlsb` templates.
-3. **Packaged controller v5**: release `20261102-cache-v4` rejects `--stage 3`,
-   so the Prepare MACalc button only works after a v5 build that includes
-   `sst_stage_three`, then promotion (P15). Build and promotion need explicit
-   approval. Consider building once the next slices are in, so colleagues
-   get a single release.
+1. **Commit the v6 build fix** before starting Slice D:
+   - the changes to `tools/build_packaged_stages.py` and
+     `tests/test_bonds_lite_input.py`;
+   - the release notes in `references/plan-stage-three.md`,
+     `references/bonds-lite-setup.md` (deployment status) and this handoff.
 
-## Running Stage 3 In Source Mode (until v5 is released)
+   Use Supir Commit, with a message such as
+   `fix: Hidden-import Stage 3 in the controller build only` and the
+   Co-authored-by trailer. The full suite gives 866 passed, 85 skipped and the
+   2 expected failures:
+   - `test_frozen_main_validates_cached_bundle_before_stage_dispatch`;
+   - `test_model_results_transaction_rollback_failure_retains_recoverable_backup`.
+
+   Do not commit `__pycache__`, `.pytest_cache`, `Bonds Lite output/`, the
+   Draft backups or the `.xlsb` templates.
+2. **Slice D**: see "Next Session" above.
+3. **Optional repository hygiene** (proposed Commit 3; not yet approved):
+   - stop tracking the two `.pyc` files;
+   - ignore `.pytest_cache/` and `Bonds Lite output/`;
+   - decide what to do with the templates and backups.
+
+## Running Stage 3 In Source Mode (maintainers; the packaged release v6 includes Stage 3)
 
 The 3 November run used the source controller against the open Draft. Excel
 had the Draft open by its SharePoint URL, so `--caller` must be that URL and

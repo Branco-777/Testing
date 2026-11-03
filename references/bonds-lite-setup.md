@@ -37,8 +37,10 @@ existing scenario inputs, templates and output paths as configured; those data
 paths are separate from the application cache. Do not copy application files
 between releases or delete LocalAppData cache folders while a run is active.
 
-**Deployment status:** release `20261102-cache-v4` is active in both the central
-pointer and this user's LocalAppData cache. The backed-up Draft has the three
+**Deployment status:** release `20261103-cache-v6` (Stages 1-3) is active in
+both the central pointer and this user's LocalAppData cache since
+3 November 2026. To roll back, write `20261102-cache-v4` to the central
+`current.txt`; v4 runs Stages 1-2 only. The backed-up Draft has the three
 Stage 1 path names installed. No path-control movement is required; moving a
 control is optional.
 

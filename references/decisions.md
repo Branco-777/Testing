@@ -476,3 +476,18 @@ Requirements confirmed on 27 October 2026. Implementation decisions added on 28 
 - Strip `+`/`-` from the notched rating (the first version of this decision). Withdrawn: it derives the suffix heuristically rather than comparing exactly with a CSV field, which is what the approved rule asks for.
 - Accept any grade from a fixed set. Rejected: it no longer ties the suffix to the row's own rating.
 **Rationale:** Exact equality with the row's own CSV rating field is the approved rule; `Final_Rating` is the only CSV field for which the plan's discovery holds. Reverse it by changing the field read into `MapBaseRow.final_rating`.
+
+## Agent-made decisions pending user approval
+
+### Decision 54: Unique MACalc Input Filename (Slice D) (2026-11-03, proposed)
+**Question:** `MACalc_Batch` (Stage 4) needs each MACalc input workbook to have a name that is unique across synced SharePoint folders. What unique suffix should Stage 3 add to `MACalc input.xlsb`?
+**Decided by:** Agent (proposed for the user's approval at the start of the Slice D session, together with plan questions Q-D1 to Q-D4).
+**Choice:** Name the output `MACalc input_<Stage 1 run ID>_<token>.xlsb`, where the run ID is the run folder name (`YYYYMMDD_HHMMSS`, with `_NNN` on a same-second collision) and `<token>` is `secrets.token_hex(8)` (16 lowercase hex characters), generated fresh on every Stage 3 run and regenerated if the name already exists in the run folder. Stop before any write if the folder name does not match the run-ID pattern or the full path exceeds Excel's 218-character limit. On a rerun, ask before replacing earlier tokenised outputs of the same run; leave them untouched until the new file is verified, published and the `Succeeded` audit is saved, then delete them (a failed deletion is a warning). The rename-to-backup and restore logic is removed, because a new name never overwrites an old one. Existing `MACalc input.xlsb` files are left untouched. Stage 4 must find its input through `SST_Stage3_LastSuccessfulOutput`.
+**Alternatives considered:**
+- Stage 3 run timestamp: rejected, because every rerun would add a new file and bypass the overwrite prompt and backup.
+- Run ID only (the first proposal): unique only within one output root. Two Drafts starting Stage 1 in the same second, or a copied run folder, give the same name, so it does not meet the requirement.
+- Run ID plus the Windows user name: still clashes for one user running two Drafts in the same second, and puts the user name in the file name.
+- Run ID plus a token reused across reruns: one stable name per handoff, but a copied run folder carries the token and duplicates it on rerun.
+- Full UUID4 (32 hex characters): 122 random bits, but 16 more path characters near Excel's 218 limit. Fallback if the user prefers it (plan Q-D1).
+- Stage 3 timestamp: not unique across Drafts started in the same second.
+**Rationale:** The requirement is uniqueness across synced folders, which a run ID cannot give because it is unique only within one output root. A fresh 64-bit random token per run makes a clash negligible (about 3 in a trillion among 10,000 outputs) without a central registry, which Stage 3 cannot consult. Keeping the run ID preserves traceability. Because new and old names never coincide, earlier outputs survive any failure by construction, which keeps the P14 guarantee with simpler code. `MACalc_Batch` was not inspected (Decision 51), so its naming rules are still to be confirmed by the user (plan Q-D1).
