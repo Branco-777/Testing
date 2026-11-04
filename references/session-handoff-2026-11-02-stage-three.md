@@ -5,11 +5,20 @@ the authoritative Stage 3 plan. Decisions are in `references/decisions.md`
 (Decisions 32-54). The earlier handoff `references/session-handoff-2026-11-02.md`
 covers Stages 1 and 2.
 
-## Slice D Status (3 November 2026, 18:18 UTC): v7 promoted, packaged test pending
+## Next Session: Stage 4 (4 November 2026)
 
-Slice D is implemented in `src/sst_stage_three.py` and its tests but is
-**not yet committed**. The details are in the plan's "Addendum: Slice D
-Implementation Progress", and Decision 54 is approved with changes.
+Use the [Stage 4 handoff](session-handoff-2026-11-04-stage-four.md).
+The user now asks to explore MACalc Batch and run it with Stage 3's handed-off
+output as **Stage 4**. Older references call this Stage 5; their no-model-work
+restriction applies to Stage 3, not to this newly requested Stage 4 work.
+
+## Slice D Status (3 November 2026, 18:54 UTC): v8 promoted
+
+Slice D is committed as `0fdf81a` (`feat: Give each MACalc input a unique
+filename`). The 218-character output/staging path limit is included in
+release `20261103-cache-v8`. The user approved promotion; the central pointer
+now targets v8. The user's LocalAppData cache is expected to update when Excel
+next checks the pointer. Decision 54 is approved with changes.
 
 What Stage 3 now does:
 - **Output name:** `MACalc input_<run ID>_<16 hex>.xlsb`, with a fresh token on
@@ -22,9 +31,8 @@ What Stage 3 now does:
   Staging in local `%TEMP%` does not work, because Excel rewrites the
   template's SharePoint links.
 - **Path limit:** the run stops if the output or staged path exceeds 218
-  characters (Excel's limit). It was first 259 (Q-D1); the user lowered it
-  after the v7 build, so it ships in the next release. The staged path is
-  204 characters on this Draft.
+  characters (Excel's limit). The staged path is 204 characters on this
+  Draft. This limit is in the active v8 release.
 - **Legacy files (Q-D4):** `MACalc input.xlsb` files are ignored.
 
 Verification so far:
@@ -34,6 +42,10 @@ Verification so far:
   `%TEMP%`.
 - Three live source-mode runs on `20261103_161318` each printed the accepted
   Slice C summary.
+- v8 build: both self-tests passed. Compared with v6, the controller has the
+  same 82 files and 469 frozen modules, and the model has the same 869 files
+  and 1,770 modules; neither bundle has added or removed files or modules.
+  The central pointer targets `20261103-cache-v8`. Rollback is to v7.
 
 Status and remaining steps:
 1. Done: the user confirmed that `MACalc_Batch` scans only the folder holding
@@ -46,13 +58,14 @@ Status and remaining steps:
    'HeaderRowRange'` in the MAP import. This could not be reproduced (six
    repeat MAP imports succeeded) and the retry passed; it is unrelated to
    Slice D.
-4. Done: with approval, committed `feat: Give each MACalc input a unique
-   filename`, including the 218-character path limit.
-5. Next: build and promote a release carrying the 218 limit, when the user
-   approves (v7 still enforces 259).
-   (Supir Commit, with the Co-authored-by trailer).
+4. Done: with approval, committed `0fdf81a feat: Give each MACalc input a
+   unique filename`, including the 218-character path limit.
+5. Done: built and verified `20261103-cache-v8` without `--promote`; the user
+   then approved promotion. The central pointer targets v8; rollback is to
+   `20261103-cache-v7`.
 
-Do not inspect, change or run `MACalc_Batch` (Decision 51).
+During Stage 3, do not inspect, change or run `MACalc_Batch` (Decision 51).
+Tomorrow's separately requested Stage 4 work is covered by the handoff above.
 
 ## Current Status (3 November 2026, 16:45)
 
