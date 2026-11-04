@@ -37,11 +37,12 @@ existing scenario inputs, templates and output paths as configured; those data
 paths are separate from the application cache. Do not copy application files
 between releases or delete LocalAppData cache folders while a run is active.
 
-**Deployment status:** release `20261103-cache-v7` (Stages 1-3) is active in
-the central pointer since 3 November 2026. This user's LocalAppData cache
-updates when Excel next checks the pointer on a button click; packaged
-Stage 1-3 testing is pending. To roll back, write `20261103-cache-v6` to the
-central `current.txt`. The backed-up Draft has the three Stage 1 path names
+**Deployment status:** release `20261103-cache-v8` (Stages 1-3) is active in
+the central pointer since 3 November 2026. It includes the 218-character
+Excel workbook path limit. The user's packaged Stage 1-3 test passed on v7;
+v8's LocalAppData cache updates when Excel next checks the pointer on a
+button click. To roll back, write `20261103-cache-v7` to the central
+`current.txt`. The backed-up Draft has the three Stage 1 path names
 installed. No path-control movement is required; moving a control is
 optional.
 
@@ -88,7 +89,10 @@ The packaged colleague runtime does not read them.
 | Draft I. Control!D11 | Excel date | Valuation date copied to output I. Control!D10 |
 | Draft I. Control!D9 | Text | Entity copied to output I. Control!D13 |
 | Draft I. Credit Stresses | Numeric cells | All 12 blocks required; decimals, copied without scaling |
-| Output location | Derived, not an input cell | Bonds Lite output under the saved Draft workbook's folder |
+| Credit downgrade flag | Workbook name `SST_Credit_DG_standalone` (I. Control!D16) | Excel TRUE/FALSE (text "TRUE", 1 or blank stop Stage 1). Checked against the transition matrices `C9:J15`, `C20:J26`, `C31:J37` and `C42:J48` with exact comparisons, where the identity means 1 on the diagonal and 0 elsewhere, including D. TRUE with an identity matrix (no downgrade), or FALSE with a non-identity matrix, is an inconsistency: Stage 1 lists it and asks whether to proceed (see Use) |
+| Credit spread flag | Workbook name `SST_Credit_spread_standalone` (I. Control!D17) | Excel TRUE/FALSE. Checked against the eight spread grids (`M:DI` and `DL:HH` for each row group). TRUE with every grid exactly zero, or FALSE with any grid holding a non-zero value, is an inconsistency that Stage 1 lists and asks about. Both flags FALSE always stops Stage 1; both TRUE gives one combined run. The grids are always copied unchanged, whatever the flags say |
+| Output folder suffix | Workbook name `SST_output_folder_suffix` (I. Control!D66) | Non-blank text or a whole number (7.0 becomes `7`), without `<>:"/\|?*` or control characters and not ending in a dot or space. Names the run's `SST Output_<suffix>` folder. Reusing a suffix overwrites that folder's `Credit` output, including its Stage 2 results and Stage 3 MACalc inputs. To keep earlier outputs, change the suffix or archive the folder first |
+| Output location | Derived, not an input cell | `SST Output_<suffix>\Credit` beside the saved Draft workbook |
 
 Paths may be absolute or filenames relative to Draft. Use the locally synchronised OneDrive path, not an HTTPS link. Draft, Bonds data, MAP data and the shared template must all be distinct files. D41 is unused. On first installation or migration, the installer checks the labels beside D39, D40 and D42 and creates the three workbook names there. After migration, move a path cell with Excel Cut/Paste so its defined name follows it; copying a cell does not move the named control. Do not delete or rename these names. Partial/missing names or labels that do not match the legacy layout are rejected instead of guessed.
 
@@ -103,16 +107,16 @@ The supplied source was rescanned as B8:ATT1066, or 1,058 bond rows; the supplie
 3. Confirm date/entity and populate every required numeric stress cell. Genuine zero is valid; a blank is not zero.
 4. On I. Credit Stresses, use C:J, M:DI and DL:HH for each row group 9:15, 20:26, 31:37 and 42:48. These are the four transition matrices and the two spread grids per currency/sector.
 5. Click Generate Bonds Lite Input on I. Control near row 73. Keep Draft open while the asynchronous Python process runs. Do not edit the inputs during a run.
-6. Follow the stages in the visible console. Wait for the saved-path or failure summary and total processing time. Audit persistence, cleanup and guard release finish before the console asks you to press Enter to close it. A second simultaneous run for the same Draft is rejected without changing the active run's audit. A failure message is not a successful output.
+6. Follow the stages in the visible console. If the credit flags and I. Credit Stresses are inconsistent, Stage 1 first lists every inconsistency and asks `Proceed with these inconsistencies? [y/N]`. Answer `y` or `yes` to continue with the stresses exactly as shown. Any other answer, or a blank, cancels the run: no folder is created or replaced and the Stage 1 audit is left as it was, so fix the flags or the stresses and rerun. Wait for the saved-path or failure summary and total processing time. Audit persistence, cleanup and guard release finish before the console asks you to press Enter to close it. A second simultaneous run for the same Draft is rejected without changing the active run's audit. A failure message is not a successful output.
 7. After Stage 1 succeeds and its saved handoff is current, click **Run Bonds Lite**. Stage 2 passes that run folder to the batch script once. Close both generated inputs in Excel first. If old results exist, answer `y` to the console overwrite question; blank or any other answer defaults to No. Stage 2 allows up to 60 minutes for the complete batch.
 
 The workflow generates two workbooks using all credit blocks, regardless of scenario toggles. Date, entity and stresses are captured once, so both outputs use the same settings even if controls are subsequently edited. Stage 2 executes the Bonds Lite model only after a saved Stage 1 handoff is validated. Entity must be nonempty Windows-safe text with no surrounding whitespace because it is used unchanged in directory names.
 
 ## Stage 3 Audit And MACalc Input
 
-Click **Prepare MACalc** on I. Control (around row 100). It runs only when Stage 2 has succeeded on the current Stage 1 handoff. It then writes `MACalc input_<run ID>_<token>.xlsb` into that same timestamped run folder, for example `MACalc input_20261103_161318_3f9c2a7be104d65e.xlsb`. The 16-character token is new on every run, so each name is unique across synced folders. Earlier outputs in the folder are kept, and a rerun simply adds a new file. **Last Successful Output** always names the newest one; Stage 4 reads its input from there and never guesses the name.
+Click **Prepare MACalc** on I. Control (around row 100). It runs only when Stage 2 has succeeded on the current Stage 1 handoff. It then writes `MACalc input_<suffix>_<token>.xlsb` into that same `SST Output_<suffix>\Credit` folder, where `<suffix>` is taken from the parent `SST Output_<suffix>` folder name; for example `MACalc input_Q2 2026_3f9c2a7be104d65e.xlsb`. The 16-character token is new on every run, so each name is unique across synced folders. Earlier outputs in the folder are kept, and a rerun simply adds a new file (a Stage 1 rerun with the same suffix replaces the whole `Credit` folder, including these files). **Last Successful Output** always names the newest one; Stage 4 reads its input from there and never guesses the name.
 
-While it runs, Stage 3 builds the workbook in `Bonds Lite output\Stage 3 staging\` and removes that folder when it finishes. The run stops before writing anything if the run folder name is not a run ID, or if the output path is longer than 218 characters, the longest path Excel can open (shorten the output folder path).
+While it runs, Stage 3 builds the workbook in `SST Output_<suffix>\Stage 3 staging\` (outside `Credit`) and removes that folder when it finishes. The run stops before writing anything if the run folder is not inside an `SST Output_<suffix>` folder, or if the output path is longer than 218 characters, the longest path Excel can open (shorten the output folder path).
 
 The blue panel `SST_Stage3_Panel` beside the button records the following:
 - Last Run, Start, Finish, Time and User;
@@ -199,7 +203,7 @@ The coral/pale-pink panel beside the button starts as Not Run and is populated b
 | Last Successful Output | L80 | Clickable relative path to the last successfully committed run folder |
 | Stage 2 Input | L82 | Active relative run-folder handoff, set only after both inputs and the audit save succeed |
 
-The two paths use wrapped merged cells through rows 81 and 83. For example, Bonds Lite output/20261028_140506 is resolved relative to the current user's local Draft folder, not the user who created the workbook. The panel remains compact: there are no separate Bonds/MAP audit fields.
+The two paths use wrapped merged cells through rows 81 and 83. For example, SST Output_Q2 2026/Credit is resolved relative to the current user's local Draft folder, not the user who created the workbook. The panel remains compact: there are no separate Bonds/MAP audit fields.
 
 ### Moving And Resizing The Panel
 
@@ -235,7 +239,7 @@ If both valid input files were created but the final audit save fails, the compl
 
 Panel duration includes the initial audit-save and generation work but excludes Python startup, final audit-save time and the Enter wait. Console total processing time is the broader measure. Midnight crossings and durations greater than 24 hours are supported.
 
-Workbook names SST_Stage1_Status, SST_Stage1_LastSuccessfulOutput and SST_Stage2_Input identify the handoff contract. Stage 2 requires a saved caller, successful status, matching folder links and both fixed nonempty input files inside that direct-child timestamped run folder. Missing members, legacy flat-file links, temporary folders, absolute handoffs and traversal are rejected. There is no fallback to the newest folder or to Bonds alone. `resolve_stage_input` returns the run folder; `resolve_stage_inputs` returns labelled Bonds and MAP file paths.
+Workbook names SST_Stage1_Status, SST_Stage1_LastSuccessfulOutput and SST_Stage2_Input identify the handoff contract. Stage 2 requires a saved caller, successful status, matching folder links and both fixed nonempty input files inside a real (non-symlinked) stress folder, currently `Credit`, whose parent is `SST Output_<suffix>` directly beside Draft. Legacy `Bonds Lite output\<timestamp>` handoffs, missing members, legacy flat-file links, temporary folders, absolute handoffs and traversal are rejected; rerun Stage 1 once to replace a legacy handoff. There is no fallback to the newest folder or to Bonds alone. `resolve_stage_input` returns the run folder; `resolve_stage_inputs` returns labelled Bonds and MAP file paths.
 
 Stage 2 is installed as an independent **Run Bonds Lite** button. It invokes `python run_bonds_batch.py <local staged input folder>` once from the configured model directory using the separate Python 3.11 environment. The two workbooks are copied byte-for-byte to local temporary storage for Excel COM access; only the three JRC-backed curve formula columns are frozen to their already validated cached numeric values in those temporary copies. Their embedded JRL output paths are unchanged, so result files still go to the corresponding folders inside the audited run. The controller checks saved output paths and scenario files as-is; if those absolute paths do not match the current run/user, regenerate Stage 1 rather than silently rewriting inputs. The temporary batch summary is validated and moved back to the audited run folder only for the existing validation/audit transaction. Original Stage 1 workbooks remain unchanged.
 
@@ -277,11 +281,11 @@ Before each save, the generated workbook's output_folder_path defined name is as
 
 ## Outputs
 
-Each attempt reserves a new YYYYMMDD_HHMMSS folder under Bonds Lite output beside Draft. Collisions receive numeric suffixes such as _001; preceding runs are never overwritten. For entity JRL:
+Each attempt creates `SST Output_<suffix>\Credit` beside Draft, where `<suffix>` is `SST_output_folder_suffix`. `SST Output_<suffix>` may already exist (for example from another stress or Stage 3 staging). If `Credit` already exists, Stage 1 overwrites it without asking: after validation (and any inconsistency prompt) it renames the old folder to `SST Output_<suffix>\~replacing Credit <YYYYMMDD_HHMMSS>` and builds a fresh `Credit`. On success the `~replacing` folder is deleted, together with the earlier Stage 2 results and Stage 3 MACalc inputs it held, so rerun Stages 2 and 3. If the attempt fails or is interrupted, the incomplete `Credit` is removed and the earlier one is renamed back. To keep an earlier output, change the suffix or archive the folder before running. The `Credit` folder is created when either credit flag is TRUE; later stresses (Interest, Inflation, Property, FX) will add sibling folders. If an attempt fails, `SST Output_<suffix>` is also removed when this attempt created it and it is now empty. For entity JRL:
 
 ```text
-Bonds Lite output/
-	20261028_140506/
+SST Output_Q2 2026/
+	Credit/
 		Bonds Lite input_Bonds.xlsx
 		Bonds Lite input_MAP.xlsx
 		JRL Bonds/
@@ -298,9 +302,9 @@ The destination tab is I. Sensitivity, singular. Raw inputs replace the resized 
 
 ## Example
 
-Set D39 to Bonds Lite data template.xlsx, D40 to Bonds Lite data template_MAP.xlsx and D42 to Bonds Lite input template.xlsx. Enter the intended entity/date and a complete approved stress scenario. D40 is deliberately not filled automatically. Missing data paths, unsafe entity text or blank required stresses report validation errors before creating a run folder.
+Set D39 to Bonds Lite data template.xlsx, D40 to Bonds Lite data template_MAP.xlsx and D42 to Bonds Lite input template.xlsx. Enter the intended entity/date, the credit flags and a complete approved stress scenario. D40 is deliberately not filled automatically. Missing data paths, unsafe entity text, blank required stresses, non-boolean flags, both flags FALSE or an unsafe suffix report validation errors before creating any output folder. Flag/stress inconsistencies are listed and need a `y` to proceed.
 
-After validation, a run at 14:05:06 on 28 October 2026 would create the paired tree shown above and audit Bonds Lite output/20261028_140506. Do not reuse example stresses merely to bypass validation unless those are the intended scenario.
+After validation, with `SST_output_folder_suffix` set to `Q2 2026`, a run would create the paired tree shown above and audit SST Output_Q2 2026/Credit. Do not reuse example stresses merely to bypass validation unless those are the intended scenario.
 
 ## Troubleshooting
 
@@ -309,7 +313,15 @@ After validation, a run at 14:05:06 on 28 October 2026 would create the paired t
 | Set BONDS_LITE_PYTHON to your Anaconda python.exe before running | Configure the per-user variable and ensure that executable exists |
 | No module named bonds_lite_input | Install this project into the exact configured interpreter |
 | Bonds/MAP/template path required | Fill D39, D40 and D42. D41 is unused; D40 is not defaulted by the installer |
-| Stage output must be a timestamped run folder | Rerun Stage 1 to create the paired output; legacy single-workbook audit links are not accepted |
+| Stage output must be an SST Output_<suffix>\<stress> folder | Rerun Stage 1 to create the paired output; legacy `Bonds Lite output\<timestamp>` and single-workbook audit links are not accepted |
+| Cannot replace the existing stress output folder | A file in `SST Output_<suffix>\Credit` is open (for example in Excel) or locked by OneDrive. Close it, let OneDrive finish syncing and rerun Stage 1. Nothing was written and the earlier output is untouched |
+| Stress output folder is not a real folder and cannot be replaced | `Credit` is a file or a link. Move it away and rerun Stage 1 |
+| The replaced output could not be deleted: ...\~replacing Credit ... | Stage 1 succeeded. Delete the named `~replacing` folder by hand when no files are open from it |
+| The earlier Credit output could not be restored ... it is kept at ... | Stage 1 failed and could not put the earlier output back. Remove any incomplete `Credit` folder, then rename the named `~replacing` folder back to `Credit` |
+| No Stage 2 base-scenario CSV ... rerun Stage 2 | Stage 1 has replaced the `Credit` folder since Stage 2 ran, so its results were removed. Rerun Stage 2, then Stage 3 |
+| No stress run is selected | Set `SST_Credit_DG_standalone` and/or `SST_Credit_spread_standalone` to TRUE |
+| Proceed with these inconsistencies? [y/N] | Review the listed flag/stress mismatches. Answer `y` only if the stresses are intended; otherwise press Enter, fix the flags or the stresses and rerun Stage 1 |
+| Stress flag ... must be TRUE or FALSE | Enter a real Excel TRUE/FALSE, not text or a number |
 | Stage run folder has no complete Bonds/MAP input | Do not run Stage 2 on a partial pair. Recreate both inputs with Stage 1 |
 | Incomplete run folder could not be removed | Close any file opened from that incomplete attempt and remove it after resolving access. Stage 1 remains failed; prior runs are not deleted |
 | Invalid credit stresses | Complete every reported cell with a real finite number; text numbers and booleans are rejected |

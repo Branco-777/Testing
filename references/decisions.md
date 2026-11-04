@@ -497,3 +497,61 @@ Requirements confirmed on 27 October 2026. Implementation decisions added on 28 
 - Staging in the run folder under a dot-prefixed name (as in v6): rejected, because `MACalc_Batch` would see it (Q-D3).
 - Staging in local `%TEMP%`: rejected after testing; Excel rewrites the SharePoint link paths, the read-back link check stops the run, and restoring the links reorders them and raised a COM error.
 **Rationale:** The requirement is uniqueness across synced folders, which a run ID cannot give because it is unique only within one output root. A fresh 64-bit random token per run makes a clash negligible (about 3 in a trillion among 10,000 outputs) without a central registry, which Stage 3 cannot consult. Keeping the run ID preserves traceability. Because new and old names never coincide, earlier outputs survive any failure by construction, which keeps the P14 guarantee with simpler code. `MACalc_Batch` was not inspected (Decision 51); its rules come from the user's answers.
+
+## Agent-made decisions pending user approval
+
+### Decision 55: Credit Stress Flags And Selection Checks (2026-11-04)
+**Question:** How should Stage 1 read and enforce `SST_Credit_DG_standalone` and `SST_Credit_spread_standalone`?
+**Decided by:** Agent (pending user approval); the identity and all-zero rules are the user's.
+**Choice:** Both names must exist and hold Excel booleans. If both are FALSE, stop, because no stress run is selected. If both are TRUE, produce one combined run, as today. Downgrade TRUE: stop if any of `C9:J15`, `C20:J26`, `C31:J37` or `C42:J48` is exactly the identity (1 on the seven rating diagonals, 0 everywhere else, including D). Spread TRUE: stop if all eight `M:DI`/`DL:HH` grids are exactly zero. Comparisons are exact. A FALSE flag is not checked, and its grids are still copied unchanged.
+**Alternatives considered:** a numerical tolerance (rejected: grids are typed inputs and exact matching is predictable); zeroing or identity-replacing the grids of a FALSE flag in the generated inputs (not requested and would change financial inputs; left open); treating non-boolean text such as "TRUE" as true (rejected: the input is ambiguous).
+**Rationale:** Implements the requested checks without changing which stresses reach the model.
+**Status (4 November 2026):** Partly superseded by Decision 58. The user approved stopping when both flags are FALSE, and approved exact comparisons. Stopping on an inconsistent selection is replaced by a warning and a prompt, and FALSE flags are now checked.
+
+### Decision 56: SST Output Folder Layout (2026-11-04)
+**Question:** Where does each run write, and what happens when the folder already exists?
+**Decided by:** Agent (pending user approval); the layout is the user's.
+**Choice:** Write to `<Draft folder>\SST Output_<suffix>\<stress folder>`, using the registry `{"Credit": (DG flag, spread flag)}`; later stresses are added to the registry. The suffix must be non-blank and filename-safe; integer-valued numbers are written without `.0`. The root may already exist. An existing stress folder stops Stage 1 before any write and asks for a different suffix. A failed attempt removes the stress folder, and also the root if this attempt created it and it is empty. The audit hands off `SST Output_<suffix>/Credit`, and legacy `Bonds Lite output\<timestamp>` handoffs are rejected.
+**Alternatives considered:** replacing the existing `Credit` folder (rejected: it destroys earlier Stage 2/3 results without consent); adding a numeric collision suffix (rejected: it contradicts the requested exact folder name); accepting legacy handoffs as well (rejected: the request replaces that layout).
+**Rationale:** Keeps the old guarantee that a run never overwrites earlier outputs.
+**Status (4 November 2026):** Partly superseded by Decision 59. The user approved the suffix rules and the rejection of legacy handoffs; they will rerun all stages at the end. An existing stress folder is now overwritten instead of stopping Stage 1.
+
+### Decision 57: Stage 3 Filename Under The New Layout (2026-11-04)
+**Question:** Decision 54 named the MACalc input after the timestamped run ID. What replaces it?
+**Decided by:** Agent (pending user approval).
+**Choice:** `MACalc input_<suffix>_<16 hex>.xlsb`, with the suffix read from the parent `SST Output_<suffix>` folder. Staging moves to `SST Output_<suffix>\Stage 3 staging\<token>`, outside `Credit`. The fresh token, the 218-character limit and the kept earlier outputs are unchanged.
+**Alternatives considered:** `MACalc input_Credit_<token>` (rejected: carries no run identity); token only (rejected: loses the traceability Decision 54 asked for).
+**Rationale:** The suffix is now the run's identity, as the run ID was.
+**Status (4 November 2026):** Not contested by the user, so treated as accepted. The user did not explicitly approve it.
+
+### Decision 58: Flag/Stress Inconsistencies Warn And Ask Instead Of Stopping (2026-11-04)
+**Question:** What happens when the credit flags and the `I. Credit Stresses` grids disagree?
+**Decided by:** User, 4 November 2026. The prompt mechanism and the inconsistency wording are the agent's choices (pending approval).
+**Choice:** Both flags are checked, whether TRUE or FALSE. Comparisons are exact, and a matrix counts as the identity when it has 1 on the seven rating diagonals and 0 everywhere else, including D. These are inconsistencies:
+- downgrade TRUE: each transition matrix that is the identity;
+- downgrade FALSE: each transition matrix that is not the identity;
+- spread TRUE: all eight spread grids are zero;
+- spread FALSE: each spread grid that holds any non-zero value.
+
+If there are any, Stage 1 logs one warning that lists each inconsistency with its flag and block addresses. It then asks in the Stage 1 console: `Proceed with these inconsistencies? [y/N]`. `y`/`yes` continues with the stresses exactly as validated. Any other answer, a blank or no console input cancels the run. On cancel, Stage 1 creates and replaces no folder, leaves the Stage 1 audit exactly as it was, and says to fix the flags or the stresses and rerun. These still stop the run as before: both flags FALSE, a missing flag name, or a flag that is not an Excel boolean. The grids are always copied unchanged.
+**Alternatives considered:**
+- Stopping the run (Decision 55): replaced at the user's request.
+- A Windows message box: rejected because every stage already confirms in the console (Stage 2's overwrite prompt, Decision 14).
+- Neutralising the grids of a FALSE flag: rejected because the user wants consistency to be the user's responsibility.
+**Rationale:** The user remains responsible for consistency, but is always told about any mismatch before anything is written.
+
+### Decision 59: Reusing A Suffix Overwrites The Stress Folder (2026-11-04)
+**Question:** What happens when `SST Output_<suffix>\<stress folder>` already exists?
+**Decided by:** User, 4 November 2026. The safe-replace mechanism is the agent's choice (pending approval).
+**Choice:** The existing stress folder is overwritten without a further prompt. To keep an earlier output, change `SST_output_folder_suffix` or archive the folder before running. Safe-replace:
+- After validation and any inconsistency prompt, Stage 1 renames the existing folder to a backup beside it, `SST Output_<suffix>\~replacing Credit <YYYYMMDD_HHMMSS>`. It then builds a fresh `Credit`.
+- On success, it deletes the backup. If that deletion fails, it warns and names the backup, and the run still succeeds.
+- On failure or interrupt, it removes the incomplete `Credit` and renames the backup back.
+- If the first rename fails (a file is open in Excel, or OneDrive has it locked), Stage 1 stops before writing and asks the user to close files from that folder.
+
+Earlier Stage 2 results and Stage 3 MACalc inputs inside the replaced folder are deleted with it, so Stages 2 and 3 must be rerun.
+**Alternatives considered:**
+- Stop and require a new suffix (Decision 56): rejected by the user.
+- Delete the old folder before generating: rejected because a failed run would then lose the earlier output too.
+- Ask before overwriting: rejected because the user asked for a plain overwrite.
+**Rationale:** Gives the requested overwrite while keeping the previous output if the replacement run fails.

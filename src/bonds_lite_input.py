@@ -64,6 +64,8 @@ class StageOneInputs:
     valuation_date: datetime
     entity: str
     stresses: dict[str, list[list[float]]]
+    stress_flags: dict[str, bool]
+    output_suffix: str
 
 
 @dataclass(frozen=True)
@@ -764,6 +766,14 @@ STRESS_BLOCKS = tuple(
     for row in (9, 20, 31, 42)
     for first, last in (("C", "J"), ("M", "DI"), ("DL", "HH"))
 )
+TRANSITION_BLOCKS = tuple(address for address in STRESS_BLOCKS if address.startswith("C"))
+SPREAD_BLOCKS = tuple(address for address in STRESS_BLOCKS if address not in TRANSITION_BLOCKS)
+CREDIT_DG_FLAG = "SST_Credit_DG_standalone"
+CREDIT_SPREAD_FLAG = "SST_Credit_spread_standalone"
+# Each stress output folder is created when any of its Draft flags is TRUE.
+STRESS_OUTPUT_FOLDERS = {"Credit": (CREDIT_DG_FLAG, CREDIT_SPREAD_FLAG)}
+OUTPUT_SUFFIX_NAME = "SST_output_folder_suffix"
+OUTPUT_ROOT_PREFIX = "SST Output_"
 
 RAW_FIRST_COLUMN = 2
 RAW_LAST_COLUMN = 1216
@@ -1200,6 +1210,93 @@ def validate_stress_values(
     return result
 
 
+def validate_stress_selection(
+    flags: dict[str, bool], stresses: dict[str, list[list[float]]],
+) -> None:
+    """Stop only when no stress run is selected (Decision 58)."""
+    if not any(flags.values()):
+        raise BondsLiteError(
+            "No stress run is selected: set SST_Credit_DG_standalone and/or "
+            "SST_Credit_spread_standalone to TRUE"
+        )
+
+
+def find_stress_inconsistencies(
+    flags: dict[str, bool], stresses: dict[str, list[list[float]]],
+) -> list[str]:
+    """Return one readable line per flag/stress mismatch, using exact comparisons."""
+    identity = [
+        [1.0 if column == row else 0.0 for column in range(8)] for row in range(7)
+    ]
+    lines = []
+    downgrade = flags.get(CREDIT_DG_FLAG)
+    for address in TRANSITION_BLOCKS:
+        is_identity = stresses[address] == identity
+        if downgrade and is_identity:
+            lines.append(
+                f"{CREDIT_DG_FLAG} is TRUE but the I. Credit Stresses transition "
+                f"matrix {address} is the identity (no downgrade)"
+            )
+        elif not downgrade and not is_identity:
+            lines.append(
+                f"{CREDIT_DG_FLAG} is FALSE but the I. Credit Stresses transition "
+                f"matrix {address} is not the identity"
+            )
+    non_zero = [
+        address for address in SPREAD_BLOCKS
+        if any(value != 0.0 for row in stresses[address] for value in row)
+    ]
+    if flags.get(CREDIT_SPREAD_FLAG):
+        if not non_zero:
+            lines.append(
+                f"{CREDIT_SPREAD_FLAG} is TRUE but every I. Credit Stresses spread "
+                "grid is zero: " + ", ".join(SPREAD_BLOCKS)
+            )
+    else:
+        lines.extend(
+            f"{CREDIT_SPREAD_FLAG} is FALSE but the I. Credit Stresses spread grid "
+            f"{address} holds non-zero values"
+            for address in non_zero
+        )
+    return lines
+
+
+def confirm_stress_inconsistencies(lines: list[str]) -> bool:
+    """Warn about every inconsistency, then require explicit console consent."""
+    if not lines:
+        return True
+    logger.warning(
+        "The credit stress flags and I. Credit Stresses are inconsistent:\n"
+        + "\n".join(f"  - {line}" for line in lines)
+    )
+    try:
+        answer = input("Proceed with these inconsistencies? [y/N]: ")
+    except EOFError:
+        return False
+    return answer.strip().casefold() in {"y", "yes"}
+
+
+def validate_output_suffix(value: object) -> str:
+    """Return the SST Output folder suffix as Windows-safe folder-name text."""
+    if isinstance(value, Real) and not isinstance(value, bool):
+        if not math.isfinite(value) or value != int(value):
+            raise BondsLiteError(
+                f"{OUTPUT_SUFFIX_NAME} must be text or a whole number: {value!r}"
+            )
+        value = str(int(value))
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or re.search(r'[<>:"/\\|?*\x00-\x1f\x7f]', value)
+        or value.endswith((".", " "))
+    ):
+        raise BondsLiteError(
+            f"{OUTPUT_SUFFIX_NAME} must be non-blank folder-name text without "
+            f'<>:"/\\|?* or control characters, not ending in a dot or space: {value!r}'
+        )
+    return value
+
+
 def resolve_paths(
     caller_path: str | Path, bonds_path: str, map_path: str, template_path: str
 ) -> tuple[Path, Path, Path, Path]:
@@ -1267,19 +1364,127 @@ def choose_output_path(folder: Path, timestamp: datetime) -> Path:
     return candidate
 
 
-def allocate_run_folder(output_root: Path, timestamp: datetime) -> Path:
-    """Reserve one new timestamped run directory without replacing earlier runs."""
-    output_root.mkdir(parents=True, exist_ok=True)
-    stem = timestamp.strftime("%Y%m%d_%H%M%S")
-    suffix = 0
-    while True:
-        candidate = output_root / (stem if suffix == 0 else f"{stem}_{suffix:03d}")
+def allocate_stress_folder(
+    caller_folder: Path, suffix: object, folder_name: str,
+) -> tuple[Path, bool, Path | None]:
+    """Create a fresh SST Output stress folder, moving any existing one aside.
+
+    Returns the folder, whether this call created the root, and the backup
+    path of a replaced folder (or None). The caller deletes the backup on
+    success or restores it on failure (Decision 59).
+    """
+    if folder_name not in STRESS_OUTPUT_FOLDERS:
+        raise BondsLiteError(f"Unknown stress output folder: {folder_name}")
+    suffix = validate_output_suffix(suffix)
+    caller_folder = Path(caller_folder)
+    root = caller_folder / f"{OUTPUT_ROOT_PREFIX}{suffix}"
+    if root.resolve().parent != caller_folder.resolve():
+        raise BondsLiteError(
+            f"{OUTPUT_SUFFIX_NAME} must name a folder directly beside Draft: {suffix!r}"
+        )
+    if root.is_symlink() or root.exists() and not root.is_dir():
+        raise BondsLiteError(f"SST output root is not a real folder: {root}")
+    root_created = False
+    try:
+        root.mkdir()
+        root_created = True
+    except FileExistsError:
+        pass
+    folder = root / folder_name
+    backup = None
+    if folder.is_symlink() or os.path.lexists(folder) and not folder.is_dir():
+        raise BondsLiteError(
+            f"Stress output folder is not a real folder and cannot be replaced: {folder}"
+        )
+    if folder.is_dir():
+        backup = _replacement_backup_path(root, folder_name)
         try:
-            candidate.mkdir()
-        except FileExistsError:
-            suffix += 1
-            continue
-        return candidate
+            folder.rename(backup)
+        except OSError as error:
+            raise BondsLiteError(
+                f"Cannot replace the existing stress output folder: {folder}\n"
+                "Close any files open from it (for example in Excel), wait for "
+                f"OneDrive to finish syncing, and rerun Stage 1. ({error})"
+            ) from error
+    try:
+        folder.mkdir()
+    except BaseException as error:
+        if backup is not None:
+            try:
+                _restore_replaced_stress_folder(folder, backup)
+            except OSError:
+                pass  # Already logged with the backup path; keep the original error.
+        if root_created:
+            try:
+                root.rmdir()
+            except OSError:
+                pass
+        if isinstance(error, FileExistsError):
+            raise BondsLiteError(
+                f"Stress output folder already exists; another run may be writing "
+                f"it: {folder}"
+            ) from None
+        raise
+    return folder, root_created, backup
+
+
+def _replacement_backup_path(root: Path, folder_name: str) -> Path:
+    """Return an unused ``~replacing <folder> <timestamp>[_NNN]`` path in the root."""
+    stem = f"~replacing {folder_name} {datetime.now():%Y%m%d_%H%M%S}"
+    candidate = root / stem
+    counter = 0
+    while os.path.lexists(candidate):
+        counter += 1
+        candidate = root / f"{stem}_{counter:03d}"
+    return candidate
+
+
+def _restore_replaced_stress_folder(folder: Path, backup: Path) -> None:
+    """Rename the backup back over a removed folder, logging where it is if that fails."""
+    try:
+        backup.rename(folder)
+    except OSError as error:
+        logger.error(
+            f"The earlier {folder.name} output could not be restored to {folder}; "
+            f"it is kept at {backup}. Rename it back by hand. ({error})"
+        )
+        raise
+
+
+def discard_replaced_stress_folder(backup: Path | None) -> None:
+    """Delete a replaced folder's backup after success; warn if it cannot be deleted."""
+    if backup is None:
+        return
+    try:
+        shutil.rmtree(backup)
+    except OSError as error:
+        logger.warning(
+            f"Stage 1 succeeded, but the replaced output could not be deleted: "
+            f"{backup}. Delete it by hand when no files are open from it. ({error})"
+        )
+
+
+def remove_incomplete_stress_folder(
+    folder: Path, root_created: bool, backup: Path | None = None,
+) -> None:
+    """Remove a failed attempt's stress folder, restore any replaced folder, and
+    remove the root if this attempt created it and it is now empty."""
+    try:
+        shutil.rmtree(folder)
+    except BaseException:
+        if backup is not None:
+            logger.error(
+                f"The incomplete {folder.name} folder could not be removed, so the "
+                f"earlier output was not restored; it is kept at {backup}"
+            )
+        raise
+    if backup is not None:
+        _restore_replaced_stress_folder(folder, backup)
+    if root_created:
+        try:
+            folder.parent.rmdir()
+        except OSError:
+            pass
 
 
 def publish_output(working_path: Path, output_folder: Path, timestamp: datetime) -> Path:
@@ -1309,23 +1514,41 @@ def _caller_path(caller: xw.Book) -> Path:
 resolve_caller_path = _caller_path
 
 
+def output_root_suffix(name: str) -> str | None:
+    """Return the suffix of an ``SST Output_<suffix>`` folder name, or None."""
+    if not name.startswith(OUTPUT_ROOT_PREFIX):
+        return None
+    try:
+        return validate_output_suffix(name[len(OUTPUT_ROOT_PREFIX):])
+    except BondsLiteError:
+        return None
+
+
 def portable_output_path(caller_path: Path, output_path: Path) -> str:
     """Return the relative folder of a complete, published Bonds/MAP input pair."""
     path = Path(output_path)
     folder = Path(caller_path).resolve().parent
-    output_folder = (folder / "Bonds Lite output").resolve()
     if (
         ".." in path.parts
         or path.is_symlink()
-        or re.fullmatch(r"\d{8}_\d{6}(?:_\d{3,})?", path.name) is None
+        or path.parent.is_symlink()
+        or path.name not in STRESS_OUTPUT_FOLDERS
+        or output_root_suffix(path.parent.name) is None
     ):
-        raise BondsLiteError("Stage output must be a timestamped run folder; rerun Stage 1 for both inputs")
+        raise BondsLiteError(
+            "Stage output must be an SST Output_<suffix>\\<stress> folder beside "
+            f"Draft (for example SST Output_<suffix>\\Credit); rerun Stage 1 for both inputs: {path}"
+        )
     resolved = path.resolve()
     if (
-        resolved.parent != output_folder
+        resolved.parent.parent != folder
+        or resolved.name != path.name
+        or resolved.parent.name != path.parent.name
         or not resolved.is_dir()
     ):
-        raise BondsLiteError(f"Stage run folder is missing or outside Bonds Lite output: {path}")
+        raise BondsLiteError(
+            f"Stage run folder is missing or not in an SST Output folder beside Draft: {path}"
+        )
     for dataset, filename in INPUT_FILENAMES.items():
         member = resolved / filename
         if (
@@ -1947,6 +2170,11 @@ def _stage_one_path_cell(caller: xw.Book, name: str) -> xw.Range:
     """Resolve one scalar Stage 1 path name owned by this Draft's I. Control."""
     if name not in STAGE_ONE_PATH_NAMES:
         raise BondsLiteError(f"Unknown Stage 1 path name: {name}")
+    return _control_cell(caller, name, "Stage 1 path name")
+
+
+def _control_cell(caller: xw.Book, name: str, kind: str) -> xw.Range:
+    """Resolve one workbook name to a single cell on this Draft's I. Control."""
     try:
         region = caller.names[name].refers_to_range
         if (
@@ -1956,14 +2184,35 @@ def _stage_one_path_cell(caller: xw.Book, name: str) -> xw.Range:
             or region.size != 1
         ):
             raise BondsLiteError(
-                f"Stage 1 path name must identify one cell on this workbook's "
+                f"{kind} must identify one cell on this workbook's "
                 f"I. Control sheet: {name}"
             )
         return region
     except BondsLiteError:
         raise
     except Exception as error:
-        raise BondsLiteError(f"Stage 1 path name is missing or invalid: {name}") from error
+        raise BondsLiteError(f"{kind} is missing or invalid: {name}") from error
+
+
+def read_stress_flags(caller: xw.Book) -> dict[str, bool]:
+    """Read every registered stress flag, requiring a real Excel TRUE/FALSE."""
+    flags = {}
+    for names in STRESS_OUTPUT_FOLDERS.values():
+        for name in names:
+            value = _control_cell(caller, name, "Stress flag name").value
+            if not isinstance(value, bool):
+                raise BondsLiteError(
+                    f"Stress flag {name} must be TRUE or FALSE, not {value!r}"
+                )
+            flags[name] = value
+    return flags
+
+
+def read_output_suffix(caller: xw.Book) -> str:
+    """Read and validate the SST Output folder suffix from its workbook name."""
+    return validate_output_suffix(
+        _control_cell(caller, OUTPUT_SUFFIX_NAME, "Output suffix name").value
+    )
 
 
 def initialise_stage_path_names(caller: xw.Book) -> None:
@@ -2018,7 +2267,11 @@ def validate_inputs(caller: xw.Book) -> StageOneInputs:
     entity = validate_entity(control.range("D9").value)
     if not isinstance(date, datetime):
         raise BondsLiteError("I. Control!D11 must contain a valid Excel valuation date")
-    return StageOneInputs(*paths, date, entity, read_credit_stresses(caller))
+    stresses = read_credit_stresses(caller)
+    flags = read_stress_flags(caller)
+    validate_stress_selection(flags, stresses)
+    suffix = read_output_suffix(caller)
+    return StageOneInputs(*paths, date, entity, stresses, flags, suffix)
 
 
 def synchronise_controls(settings: StageOneInputs, working: xw.Book) -> None:
@@ -2207,12 +2460,42 @@ def generate_bonds_lite_input(caller: xw.Book) -> Path:
         return _generate_bonds_lite_input(caller)
 
 
-def run_stage_one(caller: xw.Book) -> Path:
-    """Persist Stage 1's latest attempt and expose only a committed output handoff."""
+def run_stage_one(caller: xw.Book) -> Path | None:
+    """Persist Stage 1's latest attempt and expose only a committed output handoff.
+
+    Returns None, without touching any folder or the audit, when the user
+    declines to proceed with flag/stress inconsistencies (Decision 58).
+    """
     caller_path = _caller_path(caller)
     with workbook_run_guard(caller_path):
         require_stage_panel(caller)
         previous_output = _read_stage_fields(caller).get("last_output")
+        started = datetime.now()
+        clock = time.perf_counter()
+        try:
+            with timed_stage("Validate inputs and credit stresses"):
+                settings = validate_inputs(caller)
+        except BaseException as error:
+            try:
+                with timed_stage("Record unsuccessful Stage 1 audit"):
+                    write_stage_audit(caller, {
+                        "last_run": started.replace(hour=0, minute=0, second=0, microsecond=0),
+                        "start": started, "finish": datetime.now(),
+                        "elapsed": (time.perf_counter() - clock) / 86400,
+                        "user": getpass.getuser(),
+                        "status": "Interrupted" if isinstance(error, KeyboardInterrupt) else "Failed",
+                        "last_output": previous_output, "stage_two_input": None,
+                    })
+            except Exception as audit_error:
+                logger.error(f"Stage 1 failed and its audit could not be saved: {audit_error}")
+            raise
+        if not confirm_stress_inconsistencies(
+            find_stress_inconsistencies(settings.stress_flags, settings.stresses)
+        ):
+            logger.info(
+                "Fix the credit stress flags or I. Credit Stresses and rerun Stage 1"
+            )
+            return None
         started = datetime.now()
         clock = time.perf_counter()
         with timed_stage("Record Stage 1 audit start"):
@@ -2223,7 +2506,7 @@ def run_stage_one(caller: xw.Book) -> Path:
                 "stage_two_input": None,
             })
         try:
-            output = _generate_bonds_lite_input(caller)
+            output = _generate_bonds_lite_input(caller, settings)
             relative = portable_output_path(caller_path, output)
         except BaseException as error:
             terminal = {
@@ -2263,12 +2546,19 @@ def run_stage_one(caller: xw.Book) -> Path:
 
 
 @timed_stage("Generate Bonds and MAP inputs")
-def _generate_bonds_lite_input(caller: xw.Book) -> Path:
-    """Generate one complete Bonds/MAP run while the caller owns the run guard."""
-    with timed_stage("Validate inputs and credit stresses"):
-        settings = validate_inputs(caller)
-    run_folder = allocate_run_folder(
-        settings.caller_path.parent / "Bonds Lite output", datetime.now()
+def _generate_bonds_lite_input(
+    caller: xw.Book, settings: StageOneInputs | None = None,
+) -> Path:
+    """Generate one complete Bonds/MAP run while the caller owns the run guard.
+
+    ``settings`` is the snapshot already validated (and confirmed) by
+    ``run_stage_one``; without it the Draft is validated here.
+    """
+    if settings is None:
+        with timed_stage("Validate inputs and credit stresses"):
+            settings = validate_inputs(caller)
+    run_folder, root_created, backup = allocate_stress_folder(
+        settings.caller_path.parent, settings.output_suffix, "Credit"
     )
     try:
         for dataset in INPUT_FILENAMES:
@@ -2281,17 +2571,18 @@ def _generate_bonds_lite_input(caller: xw.Book) -> Path:
                     _generate_dataset_input(caller.app, dataset, data_path, settings, run_folder)
         with timed_stage("Validate complete Bonds and MAP run"):
             portable_output_path(settings.caller_path, run_folder)
-        return run_folder
     except BaseException:
         try:
             with timed_stage("Remove incomplete Stage 1 attempt"):
-                shutil.rmtree(run_folder)
+                remove_incomplete_stress_folder(run_folder, root_created, backup)
         except Exception as cleanup_error:
             logger.error(
                 f"Incomplete run folder could not be removed: {run_folder}; "
                 f"{cleanup_error}. This attempt is not a successful Stage 1 output"
             )
         raise
+    discard_replaced_stress_folder(backup)
+    return run_folder
 
 
 def _generate_dataset_input(
@@ -2614,7 +2905,10 @@ def main() -> int:
                     logger.info(f"Stage 3 succeeded; MACalc input saved:\n{output}")
             else:
                 output = run_stage_one(matches[0])
-                logger.info(f"Saved Bonds Lite inputs in run folder:\n{output}")
+                if output is None:
+                    logger.info("Stage 1 cancelled; no output was written")
+                else:
+                    logger.info(f"Saved Bonds Lite inputs in run folder:\n{output}")
         except KeyboardInterrupt:
             logger.error("Run interrupted by the user; managed cleanup has finished")
             result = 1

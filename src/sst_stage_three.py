@@ -39,11 +39,10 @@ OUTPUT_STEM = "MACalc input"
 OUTPUT_EXTENSION = ".xlsb"
 # Excel cannot open or save a workbook whose full path exceeds 218 characters.
 MAX_OUTPUT_PATH = 218
-RUN_ID_PATTERN = re.compile(r"\d{8}_\d{6}(?:_\d{3})?")
 TOKEN_PATTERN = re.compile(r"[0-9a-f]{16}")
 MAX_TOKEN_ATTEMPTS = 10
 # Excel rewrites the template's SharePoint links when saving outside the synced
-# folder, so staging stays in the output root but outside every run folder.
+# folder, so staging stays in SST Output_<suffix> but outside every stress folder.
 STAGING_FOLDER = "Stage 3 staging"
 ASSETS_TABLE_NAME = "tbl_Assets"
 # Change here if a Bonds Lite model update renames the Stage 2 base-scenario CSV.
@@ -1055,8 +1054,9 @@ def find_map_base_output(map_output_folder: Path) -> Path:
     if not matches:
         raise StageThreeError(
             f"No Stage 2 base-scenario CSV matching {pattern!r} was found in "
-            f"{folder}. If the Bonds Lite model renamed it, update "
-            "MAP_BASE_OUTPUT_PATTERN in sst_stage_three.py"
+            f"{folder}. If Stage 1 has replaced this output folder since Stage 2 "
+            "ran, rerun Stage 2 before Stage 3. If the Bonds Lite model renamed "
+            "the CSV, update MAP_BASE_OUTPUT_PATTERN in sst_stage_three.py"
         )
     if len(matches) > 1:
         raise StageThreeError(
@@ -2155,16 +2155,16 @@ def _token() -> str:
 
 
 def output_filename(run_folder: Path, token: str) -> str:
-    """Return the MACalc input name for a Stage 1 run folder and token."""
-    run_id = run_folder.name
-    if not RUN_ID_PATTERN.fullmatch(run_id):
+    """Return the MACalc input name for a Stage 1 stress folder and token."""
+    suffix = shared.output_root_suffix(run_folder.parent.name)
+    if suffix is None:
         raise StageThreeError(
-            "Stage 1 run folder name is not a run ID (YYYYMMDD_HHMMSS, optionally "
-            f"_NNN): {run_folder}"
+            "Stage 1 run folder is not inside an SST Output_<suffix> folder: "
+            f"{run_folder}"
         )
     if not TOKEN_PATTERN.fullmatch(token):
         raise StageThreeError(f"MACalc input token is not 16 hex characters: {token}")
-    return f"{OUTPUT_STEM}_{run_id}_{token}{OUTPUT_EXTENSION}"
+    return f"{OUTPUT_STEM}_{suffix}_{token}{OUTPUT_EXTENSION}"
 
 
 def new_output_path(run_folder: Path) -> Path:

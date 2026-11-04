@@ -50,6 +50,9 @@ EXPECTED_INPUT_FILENAMES = {
     "Bonds": "Bonds Lite input_Bonds.xlsx",
     "MAP": "Bonds Lite input_MAP.xlsx",
 }
+CREDIT_FLAGS = {
+    "SST_Credit_DG_standalone": True, "SST_Credit_spread_standalone": True,
+}
 EXPECTED_STAGE_ONE_PATH_CONTROLS = {
     "SST_Stage1_BondsDataPath": (
         "D39", "C39", "Enter source for bond asset data at valuation date:"
@@ -342,11 +345,9 @@ def stage_attempt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
 
     caller_path = tmp_path / "Draft.xlsm"
     caller_path.write_bytes(b"Caller sentinel")
-    folder = tmp_path / "Bonds Lite output"
-    folder.mkdir()
-    previous = _complete_run(folder / "20261027_090000")
-    output = folder / "20261028_090000"
-    old_relative = "Bonds Lite output/20261027_090000"
+    previous = _complete_run(tmp_path / "SST Output_a" / "Credit")
+    output = tmp_path / "SST Output_b" / "Credit"
+    old_relative = "SST Output_a/Credit"
     state = SimpleNamespace(
         fields={"last_output": old_relative, "stage_two_input": old_relative,
                 "status": "Succeeded", "finish": datetime(2026, 10, 27),
@@ -355,6 +356,8 @@ def stage_attempt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
         clock=100.0, fail_saves=set(), backend_error=None, panel_error=None,
         output=output, previous=previous, caller_path=caller_path,
         old_relative=old_relative, run=run_stage_one,
+        settings=SimpleNamespace(stress_flags=dict(CREDIT_FLAGS), stresses=_stressed()),
+        validate_error=None,
     )
     caller = SimpleNamespace(fullname=str(caller_path), api=SimpleNamespace(Saved=True))
     state.caller = caller
@@ -407,8 +410,9 @@ def stage_attempt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
         if not caller.api.Saved:
             raise BondsLiteError("Audit save sentinel: Saved is false")
 
-    def backend(book: Any) -> Path:
+    def backend(book: Any, settings: Any = None) -> Path:
         assert book is caller and state.locked
+        assert settings is state.settings, "Generate from the validated snapshot"
         assert state.saves[-1]["status"] == "Running"
         assert not state.saves[-1]["stage_two_input"]
         assert not state.saves[-1]["finish"]
@@ -424,6 +428,14 @@ def stage_attempt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
         finally:
             state.events.append("cleanup")
 
+    def validate(book: Any) -> Any:
+        assert book is caller and state.locked
+        assert not state.writes, "Validate before the Running audit write"
+        state.events.append("validate")
+        if state.validate_error:
+            raise state.validate_error
+        return state.settings
+
     class AuditDatetime(datetime):
         @classmethod
         def now(cls, tz: Any = None) -> datetime:
@@ -437,6 +449,10 @@ def stage_attempt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(workflow, "_read_stage_fields", read)
     monkeypatch.setattr(workflow, "write_stage_audit", write)
     monkeypatch.setattr(workflow, "_generate_bonds_lite_input", backend)
+    monkeypatch.setattr(workflow, "validate_inputs", validate)
+    monkeypatch.setattr(
+        "builtins.input", lambda *args: pytest.fail("Consistent inputs must not prompt"),
+    )
     monkeypatch.setattr(
         subprocess, "Popen",
         lambda *args, **kwargs: pytest.fail("Stage 1 must not execute Stage 2"),
@@ -453,7 +469,7 @@ def test_run_stage_one_saves_running_then_success_after_cleanup(stage_attempt: A
     assert state.run(state.caller) == state.output
     assert state.guard_calls == [state.caller_path]
     assert state.events == [
-        "lock", "require", "read", "write", "save", "backend", "cleanup",
+        "lock", "require", "read", "validate", "write", "save", "backend", "cleanup",
         "write", "save", "release",
     ]
     running, success = state.saves
@@ -465,7 +481,7 @@ def test_run_stage_one_saves_running_then_success_after_cleanup(stage_attempt: A
     assert success["finish"] == datetime(2026, 10, 28, 9, 3)
     assert success["elapsed"] == pytest.approx(5.5 / 86400)
     assert success["status"] == "Succeeded"
-    assert success["last_output"] == "Bonds Lite output/20261028_090000"
+    assert success["last_output"] == "SST Output_b/Credit"
     assert success["stage_two_input"] == success["last_output"]
     assert _pair_bytes(state.output) == _pair_bytes(state.previous)
     assert state.caller_path.read_bytes() == b"Caller sentinel"
@@ -490,8 +506,8 @@ def test_run_stage_one_elapsed_handles_midnight_and_more_than_one_day(
         def now(cls, tz: Any = None) -> datetime:
             return started if state.clock == 100.0 else started + timedelta(seconds=seconds)
 
-    def generate(caller: Any) -> Path:
-        output = backend(caller)
+    def generate(caller: Any, settings: Any = None) -> Path:
+        output = backend(caller, settings)
         state.clock = 100.0 + seconds
         return output
 
@@ -593,6 +609,91 @@ def test_run_stage_one_duplicate_guard_rejection_never_writes(
     assert not state.writes and not state.saves
 
 
+@pytest.mark.parametrize("error", [BondsLiteError("Validation sentinel"), KeyboardInterrupt()])
+def test_run_stage_one_validation_error_records_failed_audit_before_any_folder(
+    stage_attempt: Any, error: BaseException,
+) -> None:
+    state = stage_attempt
+    state.validate_error = error
+    before = _file_tree(state.caller_path.parent)
+    with pytest.raises(type(error)) as caught:
+        state.run(state.caller)
+    assert caught.value is error
+    assert "backend" not in state.events
+    assert state.events[:4] == ["lock", "require", "read", "validate"]
+    assert len(state.saves) == 1
+    failed = state.saves[0]
+    assert failed["status"] == (
+        "Interrupted" if isinstance(error, KeyboardInterrupt) else "Failed"
+    )
+    assert failed["user"] == "audit-user" and failed["start"] and failed["finish"]
+    assert failed["last_output"] == state.old_relative
+    assert not failed["stage_two_input"]
+    assert _file_tree(state.caller_path.parent) == before
+    assert not state.locked
+
+
+@pytest.mark.parametrize("answer", ["n", "", "EOF"])
+def test_run_stage_one_cancel_leaves_folders_and_audit_unchanged(
+    stage_attempt: Any, monkeypatch: pytest.MonkeyPatch, answer: str,
+) -> None:
+    state = stage_attempt
+    state.settings.stresses = _neutral_stresses()
+    existing = state.output
+    _complete_run(existing)
+    (existing / "JRL MAP").mkdir()
+    (existing / "JRL MAP" / "results.csv").write_bytes(b"Stage 2 results")
+    before = _file_tree(state.caller_path.parent)
+    fields = deepcopy(state.fields)
+    prompts: list[str] = []
+
+    def ask(prompt: str) -> str:
+        prompts.append(prompt)
+        if answer == "EOF":
+            raise EOFError
+        return answer
+
+    monkeypatch.setattr("builtins.input", ask)
+    assert state.run(state.caller) is None
+    assert prompts == ["Proceed with these inconsistencies? [y/N]: "]
+    assert state.events == ["lock", "require", "read", "validate", "release"]
+    assert not state.writes and not state.saves and state.fields == fields
+    assert _file_tree(state.caller_path.parent) == before
+    assert not state.locked
+
+
+def test_run_stage_one_proceeds_with_confirmed_snapshot(
+    stage_attempt: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = stage_attempt
+    state.settings.stresses = _neutral_stresses()
+    prompts: list[str] = []
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "Y")
+    assert state.run(state.caller) == state.output
+    assert len(prompts) == 1
+    assert state.events.index("validate") < state.events.index("write")
+    assert [save["status"] for save in state.saves] == ["Running", "Succeeded"]
+
+
+def test_main_logs_stage_one_cancellation_without_output(
+    monkeypatch: pytest.MonkeyPatch, console_logger: logging.Logger,
+    reporting_threads: list[Any], capsys: pytest.CaptureFixture[str],
+) -> None:
+    import bonds_lite_input as workflow
+
+    caller = SimpleNamespace(fullname="Draft.xlsm", api=SimpleNamespace(FullName="Draft.xlsm"))
+    app = SimpleNamespace(api=SimpleNamespace(Hwnd=1234), books=[caller])
+    monkeypatch.setitem(sys.modules, "xlwings", SimpleNamespace(apps=[app]))
+    monkeypatch.setattr(sys, "argv", [
+        "bonds_lite_input", "--caller", "Draft.xlsm", "--excel-hwnd", "1234",
+    ])
+    monkeypatch.setattr(workflow, "run_stage_one", lambda book: None)
+    assert workflow.main() == 0
+    console = capsys.readouterr().out
+    assert "Stage 1 cancelled; no output was written" in console
+    assert "Saved Bonds Lite inputs" not in console
+
+
 def test_generate_bonds_lite_input_guards_private_backend_without_audit_or_save(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -602,7 +703,7 @@ def test_generate_bonds_lite_input_guards_private_backend_without_audit_or_save(
     events: list[str] = []
     path = tmp_path / "Draft.xlsm"
     caller = SimpleNamespace(fullname=str(path))
-    output = _complete_run(tmp_path / "Bonds Lite output" / "20261028_090000")
+    output = _complete_run(tmp_path / "SST Output_b" / "Credit")
 
     @contextmanager
     def guard(identity: Path) -> Iterator[None]:
@@ -633,7 +734,7 @@ def test_generate_bonds_lite_input_guards_private_backend_without_audit_or_save(
 
 
 @pytest.mark.parametrize("username", ["Joao Branco", "Sarah Walker"])
-@pytest.mark.parametrize("suffix", ["", "_001", "_1001"])
+@pytest.mark.parametrize("suffix", ["a", "Q2 2026", "run_001"])
 def test_portable_output_path_round_trips_for_different_users(
     tmp_path: Path,
     username: str,
@@ -644,9 +745,9 @@ def test_portable_output_path_round_trips_for_different_users(
     from bonds_lite_input import portable_output_path
 
     folder = tmp_path / "Users" / username / "OneDrive - Just Group" / "Testing"
-    output = _complete_run(folder / "Bonds Lite output" / f"20261028_090000{suffix}")
+    output = _complete_run(folder / f"SST Output_{suffix}" / "Credit")
     relative = portable_output_path(folder / "Draft.xlsm", output)
-    assert relative == f"Bonds Lite output/20261028_090000{suffix}"
+    assert relative == f"SST Output_{suffix}/Credit"
     assert not Path(relative).is_absolute()
     assert ".." not in Path(relative).parts and "\\" not in relative
     assert (folder / relative).resolve() == output.resolve()
@@ -687,10 +788,10 @@ def test_portable_output_path_round_trips_for_different_users(
         "empty_bonds",
         "empty_map",
         "directory_member",
-        "short_suffix",
+        "truncated_name",
         "foreign_symlink",
-        "bad_timestamp",
-        "alpha_suffix",
+        "legacy_timestamp",
+        "renamed_copy",
     ],
 )
 def test_portable_output_path_rejects_unpublished_or_outside_files(
@@ -699,29 +800,29 @@ def test_portable_output_path_rejects_unpublished_or_outside_files(
 ) -> None:
     from bonds_lite_input import portable_output_path
 
-    folder = tmp_path / "Bonds Lite output"
+    folder = tmp_path / "SST Output_a"
     folder.mkdir()
-    output = folder / "20261028_090000"
+    output = folder / "Credit"
     if scenario == "outside":
-        output = tmp_path / "20261028_090000"
+        output = tmp_path / "Credit"
     elif scenario == "sibling_prefix":
-        output = tmp_path / "Bonds Lite output other" / "20261028_090000"
+        output = tmp_path / "SST Outputa" / "Credit"
     elif scenario == "wrong_suffix":
-        output = folder / "20261028_090000.xlsx"
+        output = folder / "Credit.xlsx"
     elif scenario == "temporary":
         output = folder / ".bonds-lite-pending"
     elif scenario == "traversal":
-        _complete_run(folder / "20261028_090000")
-        output = folder / "nested" / ".." / "20261028_090000"
+        _complete_run(folder / "Credit")
+        output = folder / "nested" / ".." / "Credit"
         (folder / "nested").mkdir()
     elif scenario == "nested":
-        output = folder / "nested" / "20261028_090000"
-    elif scenario == "short_suffix":
-        output = folder / "20261028_090000_01"
-    elif scenario == "bad_timestamp":
-        output = folder / "20261028-090000"
-    elif scenario == "alpha_suffix":
-        output = folder / "20261028_090000_abc"
+        output = folder / "nested" / "Credit"
+    elif scenario == "truncated_name":
+        output = folder / "Credi"
+    elif scenario == "legacy_timestamp":
+        output = tmp_path / "Bonds Lite output" / "20261028_090000"
+    elif scenario == "renamed_copy":
+        output = folder / "Credit_abc"
     if scenario == "legacy_file":
         output = folder / "input.xlsx"
         output.write_bytes(b"Legacy single input")
@@ -798,10 +899,10 @@ def test_resolve_stage_input_gates_handoff_without_executing_stage_two(
     caller = SimpleNamespace(
         fullname=str(tmp_path / "Draft.xlsm"), api=SimpleNamespace(Saved=True)
     )
-    folder = tmp_path / "Bonds Lite output"
+    folder = tmp_path / "SST Output_b"
     folder.mkdir()
-    output = _complete_run(folder / "20261028_090000")
-    relative = "Bonds Lite output/20261028_090000"
+    output = _complete_run(folder / "Credit")
+    relative = "SST Output_b/Credit"
     fields = {
         "status": "Succeeded",
         "stage_two_input": relative,
@@ -829,7 +930,7 @@ def test_resolve_stage_input_gates_handoff_without_executing_stage_two(
     elif scenario == "blank_input":
         fields["stage_two_input"] = ""
     elif scenario == "mismatch":
-        fields["stage_two_input"] = "Bonds Lite output/20261027_090000"
+        fields["stage_two_input"] = "SST Output_a/Credit"
     elif scenario in (
         "absolute",
         "outside",
@@ -840,11 +941,11 @@ def test_resolve_stage_input_gates_handoff_without_executing_stage_two(
     ):
         invalid = {
             "absolute": str(output),
-            "outside": "20261028_090000",
-            "traversal": "Bonds Lite output/../20261028_090000",
-            "wrong_suffix": "Bonds Lite output/20261028_090000.xlsx",
-            "temporary": "Bonds Lite output/.bonds-lite-pending/20261028_090000",
-            "traversal_inside": "Bonds Lite output/nested/../20261028_090000",
+            "outside": "Credit",
+            "traversal": "SST Output_b/../Credit",
+            "wrong_suffix": "SST Output_b/Credit.xlsx",
+            "temporary": "SST Output_b/.bonds-lite-pending/Credit",
+            "traversal_inside": "SST Output_b/nested/../Credit",
         }[scenario]
         if scenario != "absolute":
             invalid_file = tmp_path / invalid
@@ -861,8 +962,8 @@ def test_resolve_stage_input_gates_handoff_without_executing_stage_two(
         legacy = folder / "input.xlsx"
         legacy.write_bytes(b"Legacy output")
         fields.update(
-            stage_two_input="Bonds Lite output/input.xlsx",
-            last_output="Bonds Lite output/input.xlsx",
+            stage_two_input="SST Output_b/input.xlsx",
+            last_output="SST Output_b/input.xlsx",
         )
     elif scenario.startswith(("missing_", "empty_")):
         dataset = "MAP" if scenario.endswith("map") else "Bonds"
@@ -2469,7 +2570,7 @@ def test_pure_workflow_contract_validates_before_reserving_paired_run(
     stress_values: dict[str, list[list[object]]],
 ) -> None:
     """Validate inputs before reserving a new, empty paired-run directory."""
-    from bonds_lite_input import allocate_run_folder
+    from bonds_lite_input import allocate_stress_folder
 
     caller, data, map_data, template = local_paths
     before = {path: path.read_bytes() for path in local_paths}
@@ -2478,12 +2579,10 @@ def test_pure_workflow_contract_validates_before_reserving_paired_run(
     validate_headers(CASES["schema"]["valid"], CASES["schema"]["destination"])
     validate_identifiers(CASES["identifiers"]["valid"])
     validated = validate_stress_values(stress_values)
-    output_folder = resolved[0].parent / "Bonds Lite output"
-    output = allocate_run_folder(
-        output_folder, datetime.fromisoformat(CASES["output"]["timestamp"])
-    )
+    output, root_created, backup = allocate_stress_folder(resolved[0].parent, "a", "Credit")
     assert validated == stress_values
-    assert output == output_folder / "20261027_140506"
+    assert output == resolved[0].parent / "SST Output_a" / "Credit" and root_created
+    assert backup is None
     assert output not in resolved
     assert output.is_dir() and not list(output.iterdir())
     assert {path: path.read_bytes() for path in local_paths} == before
@@ -2709,6 +2808,9 @@ def input_controls(local_paths: tuple[Path, Path, Path, Path]) -> Any:
         "D41": "",
         "D11": datetime(2026, 9, 30),
         "D9": "JRL",
+        "D16": True,
+        "D17": True,
+        "D66": "a",
     }
     reads: list[str] = []
     path_addresses = dict(zip(
@@ -2716,6 +2818,11 @@ def input_controls(local_paths: tuple[Path, Path, Path, Path]) -> Any:
         ("D39", "D40", "D42"),
         strict=True,
     ))
+    path_addresses.update({
+        "SST_Credit_DG_standalone": "D16",
+        "SST_Credit_spread_standalone": "D17",
+        "SST_output_folder_suffix": "D66",
+    })
 
     class NamedPathCell:
         def __init__(self, name: str) -> None:
@@ -2734,9 +2841,7 @@ def input_controls(local_paths: tuple[Path, Path, Path, Path]) -> Any:
         sheets={"I. Control": SimpleNamespace(range=None)},
         app=object(),
     )
-    named_path_cells = {
-        name: NamedPathCell(name) for name in workflow.STAGE_ONE_PATH_NAMES
-    }
+    named_path_cells = {name: NamedPathCell(name) for name in path_addresses}
     for cell in named_path_cells.values():
         cell.sheet.book = caller
     caller.names = {
@@ -2915,6 +3020,8 @@ def test_validate_inputs_captures_frozen_snapshot_from_named_path_controls(
         "valuation_date",
         "entity",
         "stresses",
+        "stress_flags",
+        "output_suffix",
     }
     assert (
         settings.caller_path,
@@ -2926,7 +3033,13 @@ def test_validate_inputs_captures_frozen_snapshot_from_named_path_controls(
     assert settings.entity == "JRL" and settings.stresses == stress_values
     assert sorted(state.reads) == sorted([
         *workflow.STAGE_ONE_PATH_NAMES, "D11", "D9",
+        "SST_Credit_DG_standalone", "SST_Credit_spread_standalone",
+        "SST_output_folder_suffix",
     ])
+    assert settings.stress_flags == {
+        "SST_Credit_DG_standalone": True, "SST_Credit_spread_standalone": True,
+    }
+    assert settings.output_suffix == "a"
     assert stress_reads == [state.caller]
     assert sorted(block_reads) == sorted([*workflow.STRESS_BLOCKS, *header_values])
     captured_stresses = deepcopy(settings.stresses)
@@ -2989,7 +3102,7 @@ def test_validate_inputs_missing_required_control_creates_no_outputs(
     )
     with pytest.raises(BondsLiteError):
         workflow._generate_bonds_lite_input(state.caller)
-    assert not (state.paths[0].parent / "Bonds Lite output").exists()
+    assert not (state.paths[0].parent / "SST Output_a").exists()
     assert {path: path.read_bytes() for path in state.paths} == before
 
 
@@ -3016,7 +3129,7 @@ def test_validate_inputs_rejects_invalid_snapshot_controls(
     monkeypatch.setattr(workflow, "read_credit_stresses", lambda caller: {})
     with pytest.raises(BondsLiteError, match=rf"(?i){address}|entity|date"):
         workflow.validate_inputs(input_controls.caller)
-    assert not (input_controls.paths[0].parent / "Bonds Lite output").exists()
+    assert not (input_controls.paths[0].parent / "SST Output_a").exists()
 
 
 @pytest.mark.parametrize(
@@ -3053,7 +3166,9 @@ def test_synchronise_controls_uses_snapshot_and_preserves_other_controls(
             self.assignments.append(value)
             self._value = value
 
-    settings = StageOneInputs(*local_paths, datetime(2026, 9, 30), "JRL", stress_values)
+    settings = StageOneInputs(
+        *local_paths, datetime(2026, 9, 30), "JRL", stress_values, CREDIT_FLAGS, "a"
+    )
     cells = {
         "D10": TrackingCell(
             datetime(2026, 6, 30) if date_changed else settings.valuation_date
@@ -3089,7 +3204,9 @@ def test_verify_saved_copy_compares_snapshot_not_live_caller(
 ) -> None:
     from bonds_lite_input import StageOneInputs, verify_saved_copy
 
-    settings = StageOneInputs(*local_paths, datetime(2026, 9, 30), "JRL", stress_values)
+    settings = StageOneInputs(
+        *local_paths, datetime(2026, 9, 30), "JRL", stress_values, CREDIT_FLAGS, "a"
+    )
     table = SimpleNamespace(
         ListRows=SimpleNamespace(Count=2 if defect == "rows" else 1)
     )
@@ -3127,37 +3244,13 @@ def test_verify_saved_copy_compares_snapshot_not_live_caller(
         assert verify_saved_copy(book, settings, 1, [10, 11], settings.stresses) is None
 
 
-@pytest.mark.parametrize("collisions", [0, 1, 3, 1001])
-def test_allocate_run_folder_reserves_without_overwriting(
-    tmp_path: Path,
-    collisions: int,
-) -> None:
-    from bonds_lite_input import allocate_run_folder
-
-    root = tmp_path / "new parent" / "Bonds Lite output"
-    stamp = "20261028_090102"
-    for index in range(collisions):
-        name = stamp if index == 0 else f"{stamp}_{index:03d}"
-        previous = root / name
-        previous.mkdir(parents=True)
-        (previous / "sentinel").write_bytes(b"Do not overwrite")
-    result = allocate_run_folder(root, datetime(2026, 10, 28, 9, 1, 2))
-    expected = stamp if collisions == 0 else f"{stamp}_{collisions:03d}"
-    assert result == root / expected and result.is_dir()
-    assert list(result.iterdir()) == []
-    assert len(list(root.iterdir())) == collisions + 1
-    assert all(
-        path.read_bytes() == b"Do not overwrite" for path in root.glob("*/sentinel")
-    )
-
-
-def test_allocate_run_folder_retries_atomic_mkdir_collision_only(
+def test_allocate_stress_folder_rejects_competing_owner_atomically(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from bonds_lite_input import allocate_run_folder
+    from bonds_lite_input import allocate_stress_folder
 
-    root = tmp_path / "Bonds Lite output"
+    root = tmp_path / "SST Output_a"
     root.mkdir()
     original = Path.mkdir
     attempts: list[tuple[Path, bool]] = []
@@ -3168,26 +3261,25 @@ def test_allocate_run_folder_retries_atomic_mkdir_collision_only(
         if path.parent == root:
             attempts.append((path, exist_ok))
             assert not exist_ok, "Reservation must atomically reject a competing owner"
-            if len(attempts) == 1:
-                original(path)
-                (path / "competitor").write_bytes(b"Other owner")
-                raise FileExistsError(str(path))
+            original(path)
+            (path / "competitor").write_bytes(b"Other owner")
+            raise FileExistsError(str(path))
         original(path, mode=mode, parents=parents, exist_ok=exist_ok)
 
     monkeypatch.setattr(Path, "mkdir", mkdir)
-    result = allocate_run_folder(root, datetime(2026, 10, 28, 9, 1, 2))
-    assert result.name == "20261028_090102_001"
-    assert len(attempts) == 2
-    assert (attempts[0][0] / "competitor").read_bytes() == b"Other owner"
+    with pytest.raises(BondsLiteError, match="(?i)already exists"):
+        allocate_stress_folder(tmp_path, "a", "Credit")
+    assert len(attempts) == 1
+    assert (root / "Credit" / "competitor").read_bytes() == b"Other owner"
 
 
-def test_allocate_run_folder_propagates_permission_failure(
+def test_allocate_stress_folder_propagates_permission_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from bonds_lite_input import allocate_run_folder
+    from bonds_lite_input import allocate_stress_folder
 
-    root = tmp_path / "Bonds Lite output"
+    root = tmp_path / "SST Output_a"
     root.mkdir()
     original = Path.mkdir
     error = PermissionError("Run reservation denied")
@@ -3199,7 +3291,7 @@ def test_allocate_run_folder_propagates_permission_failure(
 
     monkeypatch.setattr(Path, "mkdir", mkdir)
     with pytest.raises(PermissionError) as caught:
-        allocate_run_folder(root, datetime(2026, 10, 28, 9, 1, 2))
+        allocate_stress_folder(tmp_path, "a", "Credit")
     assert caught.value is error and list(root.iterdir()) == []
 
 
@@ -3224,11 +3316,12 @@ def test_generate_bonds_lite_input_pairs_snapshot_and_rolls_back_owned_attempt(
     import bonds_lite_input as workflow
 
     settings = workflow.StageOneInputs(
-        *local_paths, datetime(2026, 9, 30), "JRL", deepcopy(stress_values)
+        *local_paths, datetime(2026, 9, 30), "JRL", deepcopy(stress_values),
+        CREDIT_FLAGS, "a",
     )
     assert workflow.INPUT_FILENAMES == EXPECTED_INPUT_FILENAMES
-    root = local_paths[0].parent / "Bonds Lite output"
-    previous = _complete_run(root / "20261027_090000")
+    root = local_paths[0].parent / "SST Output_a"
+    previous = _complete_run(root.parent / "SST Output_previous" / "Credit")
     previous_bytes = _pair_bytes(previous)
     originals = {path: path.read_bytes() for path in local_paths}
     caller = SimpleNamespace(fullname=str(local_paths[0]), app=object())
@@ -3300,7 +3393,7 @@ def test_generate_bonds_lite_input_pairs_snapshot_and_rolls_back_owned_attempt(
             workflow.generate_bonds_lite_input(caller)
         if failure not in ("missing_map", "empty_map"):
             assert caught.value is error
-        assert set(root.iterdir()) == {previous}
+        assert not root.exists() and previous.is_dir()
     else:
         result = workflow.generate_bonds_lite_input(caller)
         assert result == calls[0][3]
@@ -3342,7 +3435,7 @@ def test_paired_cleanup_failure_preserves_generation_error_and_blocks_complete_p
     import bonds_lite_input as workflow
 
     settings = workflow.StageOneInputs(
-        *local_paths, datetime(2026, 9, 30), "JRL", {}
+        *local_paths, datetime(2026, 9, 30), "JRL", {}, CREDIT_FLAGS, "a"
     )
     caller = SimpleNamespace(app=object())
     original = BondsLiteError("MAP generation failed sentinel")
@@ -3365,7 +3458,7 @@ def test_paired_cleanup_failure_preserves_generation_error_and_blocks_complete_p
         workflow._generate_bonds_lite_input(caller)
     assert caught.value is original
     assert "Cleanup denied sentinel" in capsys.readouterr().out
-    run = next((local_paths[0].parent / "Bonds Lite output").iterdir())
+    run = local_paths[0].parent / "SST Output_a" / "Credit"
     with pytest.raises(BondsLiteError):
         workflow.portable_output_path(local_paths[0], run)
 
@@ -3447,9 +3540,9 @@ def test_generate_dataset_input_owns_only_source_and_unique_private_copy(
     import bonds_lite_input as workflow
 
     settings = workflow.StageOneInputs(
-        *local_paths, datetime(2026, 9, 30), "JRL", stress_values
+        *local_paths, datetime(2026, 9, 30), "JRL", stress_values, CREDIT_FLAGS, "a"
     )
-    run = local_paths[0].parent / "Bonds Lite output" / "20261028_090000"
+    run = local_paths[0].parent / "SST Output_a" / "Credit"
     run.mkdir(parents=True)
     for label in EXPECTED_INPUT_FILENAMES:
         (run / f"JRL {label}").mkdir()
@@ -3719,8 +3812,8 @@ def test_excel_stage_panel_cut_resize_reopen_uses_names_only(
     caller = stage_panel_excel_book
     application = caller.app
     sheet = caller.sheets["I. Control"]
-    output = _complete_run(tmp_path / "Bonds Lite output" / "20261028_090000")
-    relative = "Bonds Lite output/20261028_090000"
+    output = _complete_run(tmp_path / "SST Output_b" / "Credit")
+    relative = "SST Output_b/Credit"
     fields = {
         "last_run": datetime(2026, 10, 28),
         "start": datetime(2026, 10, 28, 9),
@@ -4073,8 +4166,8 @@ def test_excel_stage_panel_initialise_validate_write_and_reopen(
             finally:
                 sheet.api.Unprotect()
 
-            output = _complete_run(tmp_path / "Bonds Lite output" / "20261028_090000")
-            relative = "Bonds Lite output/20261028_090000"
+            output = _complete_run(tmp_path / "SST Output_b" / "Credit")
+            relative = "SST Output_b/Credit"
             fields = {
                 "last_run": datetime(2026, 10, 28, 9),
                 "start": datetime(2026, 10, 28, 9),
@@ -4437,7 +4530,9 @@ def test_verify_saved_copy_checks_optional_model_output_folder_after_save(
     from bonds_lite_input import StageOneInputs, verify_saved_copy
 
     book = stage_panel_excel_book
-    settings = StageOneInputs(*local_paths, datetime(2026, 9, 30), "JRL", stress_values)
+    settings = StageOneInputs(
+        *local_paths, datetime(2026, 9, 30), "JRL", stress_values, CREDIT_FLAGS, "a"
+    )
     sheet = book.sheets["I. Control"]
     sheet.range("D10").value = settings.valuation_date
     sheet.range("D13").value = settings.entity
@@ -5133,6 +5228,15 @@ def excel_workflow_case(excel_case: list[Any], stress_values: dict) -> tuple:
     control.range("D42").value = str(template)
     control.range("D9").value = "JRL"
     control.range("D11").value = datetime(2026, 9, 30)
+    control.range("D16").value = True
+    control.range("D17").value = True
+    control.range("D66").value = "a"
+    for name, cell in (
+        ("SST_Credit_DG_standalone", "$D$16"),
+        ("SST_Credit_spread_standalone", "$D$17"),
+        ("SST_output_folder_suffix", "$D$66"),
+    ):
+        caller.names.add(name, f"='I. Control'!{cell}")
     caller.save(str(folder / "Caller.xlsx"))
     return application, working, caller, data, template, folder, map_data
 
@@ -5270,7 +5374,7 @@ def _assert_excel_workflow_publishes_validated_copy(
         paths.append(dependency)
     originals = {path: path.read_bytes() for path in paths}
     output = generate_bonds_lite_input(caller)
-    assert output.parent == folder / "Bonds Lite output"
+    assert output.parent == folder / "SST Output_a" and output.name == "Credit"
     assert output.is_dir()
     assert set(path.name for path in output.iterdir()) == {
         *EXPECTED_INPUT_FILENAMES.values(),
@@ -5427,7 +5531,7 @@ def test_excel_full_workflow_publishes_validated_copy(
     for path, _ in (opens[1], opens[3]):
         assert path.name != "working.xlsx"
         assert path.name not in EXPECTED_INPUT_FILENAMES.values()
-        assert path.is_relative_to(excel_workflow_case[5] / "Bonds Lite output")
+        assert path.is_relative_to(excel_workflow_case[5] / "SST Output_a")
         assert not path.exists()
 
 
@@ -5491,7 +5595,7 @@ def test_excel_full_workflow_missing_dependency_does_not_publish(
     assert "Required formula dependency is unavailable" in str(caught.value)
     assert dependency.name in str(caught.value)
     assert {path: path.read_bytes() for path in originals} == originals
-    output_folder = folder / "Bonds Lite output"
+    output_folder = folder / "SST Output_a"
     assert not output_folder.exists() or not list(output_folder.iterdir())
     assert not list(folder.rglob("working.xlsx"))
 
@@ -6021,7 +6125,7 @@ def stage_two_results_case(tmp_path: Path, stage_two_no_excel: None) -> Any:
 
     import bonds_lite_input as workflow
 
-    folder = _complete_run(tmp_path / "Bonds Lite output" / "20261028_090000")
+    folder = _complete_run(tmp_path / "SST Output_b" / "Credit")
     inputs = {}
     for dataset, filename in EXPECTED_INPUT_FILENAMES.items():
         target = folder / f"JRL {dataset}"
@@ -6463,7 +6567,7 @@ def stage_two_attempt(
     state.caller_path = state.folder.parent.parent / "Draft.xlsm"
     state.caller_path.write_bytes(b"Caller sentinel")
     state.relative = state.folder.relative_to(state.caller_path.parent).as_posix()
-    state.previous = "Bonds Lite output/20261027_090000"
+    state.previous = "SST Output_a/Credit"
     state.fields = {
         "status": "Succeeded", "input_run": state.previous,
         "last_output": state.previous, "finish": datetime(2026, 10, 27), "elapsed": 0.1,
@@ -7576,7 +7680,7 @@ def test_excel_stage_two_panel_preserves_moved_stage_one_and_survives_move_resiz
     if resize:
         sheet.range("163:163").api.Insert()
         sheet.range("AF:AF").api.Insert()
-    output = _complete_run(tmp_path / "Bonds Lite output" / "20261028_090000")
+    output = _complete_run(tmp_path / "SST Output_b" / "Credit")
     relative = output.relative_to(tmp_path).as_posix()
     fields = {
         "last_run": datetime(2026, 10, 28), "start": datetime(2026, 10, 28, 9),
@@ -7708,3 +7812,808 @@ def test_excel_stage_two_installer_preserves_moved_controls_and_one_button_per_s
             assert "Sub RunBondsLite" in module.Lines(1, module.CountOfLines)
         finally:
             book.close()
+
+
+# ---------------------------------------------------------------------------
+# Stage 1 stress flags, selection checks and SST Output folder (Decisions 55-57)
+# ---------------------------------------------------------------------------
+
+DG_FLAG = "SST_Credit_DG_standalone"
+SPREAD_FLAG = "SST_Credit_spread_standalone"
+TRANSITION_ADDRESSES = ("C9:J15", "C20:J26", "C31:J37", "C42:J48")
+SPREAD_ADDRESSES = (
+    "M9:DI15", "DL9:HH15", "M20:DI26", "DL20:HH26",
+    "M31:DI37", "DL31:HH37", "M42:DI48", "DL42:HH48",
+)
+
+
+def _identity_grid() -> list[list[float]]:
+    """Return the 7x8 no-downgrade transition matrix (D column zero)."""
+    return [[1.0 if column == row else 0.0 for column in range(8)] for row in range(7)]
+
+
+def _neutral_stresses() -> dict[str, list[list[float]]]:
+    """Return identity transition blocks and all-zero spread blocks."""
+    stresses = {address: _identity_grid() for address in TRANSITION_ADDRESSES}
+    stresses.update({address: [[0.0] * 101 for _ in range(7)] for address in SPREAD_ADDRESSES})
+    return stresses
+
+
+def _stressed() -> dict[str, list[list[float]]]:
+    """Return grids that satisfy both checks."""
+    stresses = _neutral_stresses()
+    for address in TRANSITION_ADDRESSES:
+        stresses[address][1][1] = 0.9
+        stresses[address][1][2] = 0.1
+    stresses[SPREAD_ADDRESSES[0]][0][0] = 0.01
+    return stresses
+
+
+def test_stress_registry_and_block_constants() -> None:
+    import bonds_lite_input as workflow
+
+    assert workflow.STRESS_OUTPUT_FOLDERS == {"Credit": (DG_FLAG, SPREAD_FLAG)}
+    assert workflow.OUTPUT_SUFFIX_NAME == "SST_output_folder_suffix"
+    assert workflow.TRANSITION_BLOCKS == TRANSITION_ADDRESSES
+    assert workflow.SPREAD_BLOCKS == SPREAD_ADDRESSES
+    assert set(workflow.TRANSITION_BLOCKS + workflow.SPREAD_BLOCKS) == set(STRESS_BLOCKS)
+
+
+def test_validate_stress_selection_stops_when_no_flag_selected() -> None:
+    import bonds_lite_input as workflow
+
+    with pytest.raises(BondsLiteError, match="(?i)no stress"):
+        workflow.validate_stress_selection(
+            {DG_FLAG: False, SPREAD_FLAG: False}, _stressed()
+        )
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [{DG_FLAG: True, SPREAD_FLAG: False}, {DG_FLAG: False, SPREAD_FLAG: True},
+     {DG_FLAG: True, SPREAD_FLAG: True}],
+    ids=["downgrade", "spread", "both"],
+)
+def test_validate_stress_selection_no_longer_stops_on_inconsistency(
+    flags: dict[str, bool],
+) -> None:
+    """Decision 58: only 'no flag selected' remains a hard stop."""
+    import bonds_lite_input as workflow
+
+    assert workflow.validate_stress_selection(flags, _neutral_stresses()) is None
+
+
+def _downgrade_only() -> dict[str, list[list[float]]]:
+    """Return stressed transition matrices with all-zero spread grids."""
+    stresses = _neutral_stresses()
+    for address in TRANSITION_ADDRESSES:
+        stresses[address][0][0] = 0.95
+        stresses[address][0][1] = 0.05
+    return stresses
+
+
+def _spread_only() -> dict[str, list[list[float]]]:
+    """Return identity transition matrices with one non-zero spread cell."""
+    stresses = _neutral_stresses()
+    stresses[SPREAD_ADDRESSES[0]][0][0] = 0.01
+    return stresses
+
+
+@pytest.mark.parametrize(
+    ("flags", "stresses"),
+    [
+        ({DG_FLAG: True, SPREAD_FLAG: True}, _stressed),
+        ({DG_FLAG: True, SPREAD_FLAG: False}, _downgrade_only),
+        ({DG_FLAG: False, SPREAD_FLAG: True}, _spread_only),
+        ({DG_FLAG: False, SPREAD_FLAG: False}, _neutral_stresses),
+    ],
+    ids=["both", "downgrade", "spread", "none"],
+)
+def test_find_stress_inconsistencies_consistent_inputs_give_no_lines(
+    flags: dict[str, bool], stresses: Any,
+) -> None:
+    import bonds_lite_input as workflow
+
+    assert workflow.find_stress_inconsistencies(flags, stresses()) == []
+
+
+@pytest.mark.parametrize("address", TRANSITION_ADDRESSES)
+def test_find_stress_inconsistencies_names_identity_block_when_downgrade_selected(
+    address: str,
+) -> None:
+    import bonds_lite_input as workflow
+
+    stresses = _downgrade_only()
+    stresses[address] = _identity_grid()
+    lines = workflow.find_stress_inconsistencies(
+        {DG_FLAG: True, SPREAD_FLAG: False}, stresses
+    )
+    assert len(lines) == 1
+    assert address in lines[0] and DG_FLAG in lines[0] and "TRUE" in lines[0]
+    assert "identity" in lines[0]
+
+
+def test_find_stress_inconsistencies_lists_one_line_per_identity_block() -> None:
+    import bonds_lite_input as workflow
+
+    lines = workflow.find_stress_inconsistencies(
+        {DG_FLAG: True, SPREAD_FLAG: False}, _neutral_stresses()
+    )
+    assert len(lines) == 4
+    assert [address for line in lines for address in TRANSITION_ADDRESSES
+            if address in line] == list(TRANSITION_ADDRESSES)
+
+
+@pytest.mark.parametrize(
+    "cell", [(0, 1, 0.001), (3, 2, 0.001), (6, 7, 0.001), (2, 7, 0.0001)],
+    ids=["off-diagonal-first", "off-diagonal-middle", "default-last", "default-column"],
+)
+def test_find_stress_inconsistencies_treats_near_identity_as_stressed(
+    cell: tuple[int, int, float],
+) -> None:
+    """Exact comparison: one tiny change is not the identity."""
+    import bonds_lite_input as workflow
+
+    stresses = _neutral_stresses()
+    row, column, value = cell
+    for address in TRANSITION_ADDRESSES:
+        stresses[address][row][column] = value
+    assert workflow.find_stress_inconsistencies(
+        {DG_FLAG: True, SPREAD_FLAG: False}, stresses
+    ) == []
+    lines = workflow.find_stress_inconsistencies(
+        {DG_FLAG: False, SPREAD_FLAG: False}, stresses
+    )
+    assert len(lines) == 4
+
+
+@pytest.mark.parametrize("address", TRANSITION_ADDRESSES)
+def test_find_stress_inconsistencies_names_non_identity_block_when_downgrade_not_selected(
+    address: str,
+) -> None:
+    import bonds_lite_input as workflow
+
+    stresses = _spread_only()
+    stresses[address][4][5] = 0.02
+    lines = workflow.find_stress_inconsistencies(
+        {DG_FLAG: False, SPREAD_FLAG: True}, stresses
+    )
+    assert len(lines) == 1
+    assert address in lines[0] and DG_FLAG in lines[0] and "FALSE" in lines[0]
+    assert "not the identity" in lines[0]
+
+
+def test_find_stress_inconsistencies_reports_all_zero_spreads_when_selected() -> None:
+    import bonds_lite_input as workflow
+
+    lines = workflow.find_stress_inconsistencies(
+        {DG_FLAG: True, SPREAD_FLAG: True}, _downgrade_only()
+    )
+    assert len(lines) == 1
+    assert SPREAD_FLAG in lines[0] and "TRUE" in lines[0] and "zero" in lines[0]
+    assert all(address in lines[0] for address in SPREAD_ADDRESSES)
+
+
+@pytest.mark.parametrize("address", SPREAD_ADDRESSES)
+def test_find_stress_inconsistencies_accepts_one_nonzero_spread_cell(address: str) -> None:
+    import bonds_lite_input as workflow
+
+    stresses = _neutral_stresses()
+    stresses[address][6][100] = -0.0001
+    assert workflow.find_stress_inconsistencies(
+        {DG_FLAG: False, SPREAD_FLAG: True}, stresses
+    ) == []
+
+
+@pytest.mark.parametrize("address", SPREAD_ADDRESSES)
+def test_find_stress_inconsistencies_names_nonzero_spread_block_when_spread_not_selected(
+    address: str,
+) -> None:
+    import bonds_lite_input as workflow
+
+    stresses = _downgrade_only()
+    stresses[address][3][50] = 0.003
+    lines = workflow.find_stress_inconsistencies(
+        {DG_FLAG: True, SPREAD_FLAG: False}, stresses
+    )
+    assert len(lines) == 1
+    assert address in lines[0] and SPREAD_FLAG in lines[0] and "FALSE" in lines[0]
+    others = [other for other in SPREAD_ADDRESSES if other != address]
+    assert not any(other in lines[0] for other in others)
+
+
+def test_find_stress_inconsistencies_lists_every_kind_together() -> None:
+    import bonds_lite_input as workflow
+
+    stresses = _neutral_stresses()
+    stresses["C20:J26"][0][1] = 0.1
+    stresses["DL31:HH37"][0][0] = 0.1
+    lines = workflow.find_stress_inconsistencies(
+        {DG_FLAG: False, SPREAD_FLAG: False}, stresses
+    )
+    assert len(lines) == 2
+    assert "C20:J26" in lines[0] and "DL31:HH37" in lines[1]
+
+
+def test_confirm_stress_inconsistencies_without_lines_does_not_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bonds_lite_input as workflow
+
+    monkeypatch.setattr("builtins.input", lambda *args: pytest.fail("No prompt expected"))
+    assert workflow.confirm_stress_inconsistencies([]) is True
+
+
+@pytest.fixture
+def module_records(monkeypatch: pytest.MonkeyPatch) -> list[logging.LogRecord]:
+    """Record the module logger's records, isolated from earlier handler changes."""
+    records: list[logging.LogRecord] = []
+
+    class Recorder(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logger = logging.getLogger("bonds_lite_input")
+    monkeypatch.setattr(logger, "handlers", [Recorder()])
+    monkeypatch.setattr(logger, "level", logging.INFO)
+    monkeypatch.setattr(logger, "propagate", False)
+    monkeypatch.setattr(logger, "disabled", False)
+    return records
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [("y", True), ("YES", True), (" Yes ", True), ("", False), ("n", False),
+     ("no", False), ("yeah", False)],
+)
+def test_confirm_stress_inconsistencies_warns_then_asks(
+    monkeypatch: pytest.MonkeyPatch, module_records: list[logging.LogRecord],
+    answer: str, expected: bool,
+) -> None:
+    import bonds_lite_input as workflow
+
+    prompts: list[str] = []
+
+    def ask(prompt: str) -> str:
+        prompts.append(prompt)
+        assert any(
+            "First inconsistency" in record.getMessage() for record in module_records
+        ), "Warn before asking"
+        return answer
+
+    monkeypatch.setattr("builtins.input", ask)
+    lines = ["First inconsistency", "Second inconsistency"]
+    assert workflow.confirm_stress_inconsistencies(lines) is expected
+    assert prompts == ["Proceed with these inconsistencies? [y/N]: "]
+    warnings = [record for record in module_records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert all(line in warnings[0].getMessage() for line in lines)
+
+
+def test_confirm_stress_inconsistencies_without_console_cancels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bonds_lite_input as workflow
+
+    def no_console(prompt: str) -> str:
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", no_console)
+    assert workflow.confirm_stress_inconsistencies(["Inconsistency"]) is False
+
+
+def _named_control_book(values: dict[str, Any]) -> Any:
+    """Expose single-cell I. Control names with the supplied values."""
+    book = SimpleNamespace(fullname=str(Path("Draft.xlsm").resolve()))
+    book.names = {
+        name: SimpleNamespace(refers_to_range=SimpleNamespace(
+            value=value, size=1,
+            sheet=SimpleNamespace(name="I. Control", book=book),
+            api=SimpleNamespace(Areas=SimpleNamespace(Count=1)),
+        ))
+        for name, value in values.items()
+    }
+    return book
+
+
+def test_read_stress_flags_accepts_excel_booleans() -> None:
+    import bonds_lite_input as workflow
+
+    book = _named_control_book({DG_FLAG: True, SPREAD_FLAG: False})
+    assert workflow.read_stress_flags(book) == {DG_FLAG: True, SPREAD_FLAG: False}
+
+
+@pytest.mark.parametrize("value", ["TRUE", 1, 0, 1.0, None, ""], ids=repr)
+@pytest.mark.parametrize("name", [DG_FLAG, SPREAD_FLAG])
+def test_read_stress_flags_rejects_non_boolean_values(name: str, value: Any) -> None:
+    import bonds_lite_input as workflow
+
+    values = {DG_FLAG: True, SPREAD_FLAG: True, name: value}
+    with pytest.raises(BondsLiteError, match=name):
+        workflow.read_stress_flags(_named_control_book(values))
+
+
+@pytest.mark.parametrize("name", [DG_FLAG, SPREAD_FLAG])
+def test_read_stress_flags_rejects_missing_name(name: str) -> None:
+    import bonds_lite_input as workflow
+
+    values = {DG_FLAG: True, SPREAD_FLAG: True}
+    del values[name]
+    with pytest.raises(BondsLiteError, match=name):
+        workflow.read_stress_flags(_named_control_book(values))
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("a", "a"), ("Q2 2026", "Q2 2026"), (7.0, "7"), (7, "7"), ("run_1", "run_1")],
+)
+def test_validate_output_suffix_accepts_safe_values(value: Any, expected: str) -> None:
+    import bonds_lite_input as workflow
+
+    assert workflow.validate_output_suffix(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "   ", None, "a/b", "a\\b", "a:", "name.", "name ", "..", ".", "a*b",
+     "a?b", 'a"b', "a<b", "a|b", "a\tb", 7.5, True, float("nan")],
+    ids=repr,
+)
+def test_validate_output_suffix_rejects_unsafe_values(value: Any) -> None:
+    import bonds_lite_input as workflow
+
+    with pytest.raises(BondsLiteError, match="SST_output_folder_suffix"):
+        workflow.validate_output_suffix(value)
+
+
+def test_read_output_suffix_uses_workbook_name() -> None:
+    import bonds_lite_input as workflow
+
+    book = _named_control_book({"SST_output_folder_suffix": 7.0})
+    assert workflow.read_output_suffix(book) == "7"
+    with pytest.raises(BondsLiteError, match="SST_output_folder_suffix"):
+        workflow.read_output_suffix(_named_control_book({}))
+
+
+def test_allocate_stress_folder_creates_root_and_stress_folder(tmp_path: Path) -> None:
+    import bonds_lite_input as workflow
+
+    folder, root_created, backup = workflow.allocate_stress_folder(tmp_path, "a", "Credit")
+    assert folder == tmp_path / "SST Output_a" / "Credit"
+    assert folder.is_dir() and list(folder.iterdir()) == []
+    assert root_created is True and backup is None
+
+
+def test_allocate_stress_folder_reuses_existing_root(tmp_path: Path) -> None:
+    import bonds_lite_input as workflow
+
+    root = tmp_path / "SST Output_a"
+    (root / "Stage 3 staging").mkdir(parents=True)
+    (root / "note.txt").write_bytes(b"Keep")
+    folder, root_created, backup = workflow.allocate_stress_folder(tmp_path, "a", "Credit")
+    assert folder == root / "Credit" and folder.is_dir()
+    assert root_created is False and backup is None
+    assert (root / "note.txt").read_bytes() == b"Keep"
+
+
+def _file_tree(folder: Path) -> dict[str, bytes | None]:
+    """Snapshot every path below a folder: file bytes, or None for folders."""
+    return {
+        path.relative_to(folder).as_posix(): None if path.is_dir() else path.read_bytes()
+        for path in sorted(folder.rglob("*"))
+    }
+
+
+def _existing_credit(tmp_path: Path) -> Path:
+    """Create an earlier Credit run holding inputs and Stage 2/3 results."""
+    existing = _complete_run(tmp_path / "SST Output_a" / "Credit")
+    (existing / "JRL MAP").mkdir()
+    (existing / "JRL MAP" / "py_bonds_Base_Scenario_nozeros_BWS.csv").write_bytes(b"Old")
+    (existing / "MACalc input_a_0123456789abcdef.xlsb").write_bytes(b"Old MACalc")
+    return existing
+
+
+def test_allocate_stress_folder_replaces_existing_stress_folder_via_backup(
+    tmp_path: Path,
+) -> None:
+    import bonds_lite_input as workflow
+
+    existing = _existing_credit(tmp_path)
+    before = _file_tree(existing)
+    folder, root_created, backup = workflow.allocate_stress_folder(tmp_path, "a", "Credit")
+    assert folder == existing and folder.is_dir() and list(folder.iterdir()) == []
+    assert root_created is False
+    assert backup is not None and backup.parent == existing.parent
+    assert re.fullmatch(r"~replacing Credit \d{8}_\d{6}", backup.name)
+    assert _file_tree(backup) == before
+
+
+def test_allocate_stress_folder_backup_name_adds_counter_on_collision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bonds_lite_input as workflow
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:
+            return datetime(2026, 11, 4, 12, 30, 5)
+
+    existing = _existing_credit(tmp_path)
+    root = existing.parent
+    (root / "~replacing Credit 20261104_123005").mkdir()
+    (root / "~replacing Credit 20261104_123005_001").mkdir()
+    monkeypatch.setattr(workflow, "datetime", FixedDatetime)
+    _, _, backup = workflow.allocate_stress_folder(tmp_path, "a", "Credit")
+    assert backup == root / "~replacing Credit 20261104_123005_002"
+    assert (root / "~replacing Credit 20261104_123005").is_dir()
+
+
+def test_allocate_stress_folder_blocked_rename_stops_with_old_folder_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bonds_lite_input as workflow
+
+    existing = _existing_credit(tmp_path)
+    before = _file_tree(existing.parent)
+    original = Path.rename
+
+    def rename(path: Path, target: Any) -> Any:
+        if path.name == "Credit":
+            raise PermissionError("The process cannot access the file")
+        return original(path, target)
+
+    monkeypatch.setattr(Path, "rename", rename)
+    with pytest.raises(BondsLiteError) as caught:
+        workflow.allocate_stress_folder(tmp_path, "a", "Credit")
+    message = str(caught.value)
+    assert str(existing) in message and "close" in message.lower()
+    assert "rerun" in message.lower()
+    assert _file_tree(existing.parent) == before
+
+
+def test_allocate_stress_folder_rejects_file_named_like_stress_folder(
+    tmp_path: Path,
+) -> None:
+    import bonds_lite_input as workflow
+
+    root = tmp_path / "SST Output_a"
+    root.mkdir()
+    (root / "Credit").write_bytes(b"Not a folder")
+    with pytest.raises(BondsLiteError, match="(?i)not a real folder"):
+        workflow.allocate_stress_folder(tmp_path, "a", "Credit")
+    assert (root / "Credit").read_bytes() == b"Not a folder"
+    assert [path.name for path in root.iterdir()] == ["Credit"]
+
+
+def test_allocate_stress_folder_rejects_symlinked_stress_folder(tmp_path: Path) -> None:
+    import bonds_lite_input as workflow
+
+    target = _complete_run(tmp_path / "elsewhere" / "Credit")
+    before = _file_tree(target)
+    root = tmp_path / "SST Output_a"
+    root.mkdir()
+    try:
+        (root / "Credit").symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"Directory symlinks unavailable on this Windows profile: {error}")
+    with pytest.raises(BondsLiteError, match="(?i)not a real folder"):
+        workflow.allocate_stress_folder(tmp_path, "a", "Credit")
+    assert (root / "Credit").is_symlink()
+    assert _file_tree(target) == before
+
+
+def test_allocate_stress_folder_mkdir_failure_after_rename_restores_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bonds_lite_input as workflow
+
+    existing = _existing_credit(tmp_path)
+    before = _file_tree(existing.parent)
+    original = Path.mkdir
+    error = PermissionError("Stress folder denied")
+
+    def mkdir(path: Path, *args: Any, **kwargs: Any) -> None:
+        if path.name == "Credit":
+            raise error
+        original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    with pytest.raises(PermissionError) as caught:
+        workflow.allocate_stress_folder(tmp_path, "a", "Credit")
+    assert caught.value is error
+    assert _file_tree(existing.parent) == before
+
+
+def test_discard_replaced_stress_folder_deletes_backup(tmp_path: Path) -> None:
+    import bonds_lite_input as workflow
+
+    existing = _existing_credit(tmp_path)
+    folder, _, backup = workflow.allocate_stress_folder(tmp_path, "a", "Credit")
+    workflow.discard_replaced_stress_folder(backup)
+    assert [path.name for path in existing.parent.iterdir()] == ["Credit"]
+    assert folder.is_dir()
+    workflow.discard_replaced_stress_folder(None)
+
+
+def test_discard_replaced_stress_folder_warns_when_backup_cannot_be_deleted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    module_records: list[logging.LogRecord],
+) -> None:
+    import bonds_lite_input as workflow
+
+    _existing_credit(tmp_path)
+    _, _, backup = workflow.allocate_stress_folder(tmp_path, "a", "Credit")
+
+    def denied(path: Any, *args: Any, **kwargs: Any) -> None:
+        raise PermissionError("Backup locked sentinel")
+
+    monkeypatch.setattr(workflow.shutil, "rmtree", denied)
+    workflow.discard_replaced_stress_folder(backup)
+    warnings = [record for record in module_records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1 and str(backup) in warnings[0].getMessage()
+    assert backup.is_dir()
+
+
+def test_remove_incomplete_stress_folder_restores_replaced_folder_byte_for_byte(
+    tmp_path: Path,
+) -> None:
+    import bonds_lite_input as workflow
+
+    existing = _existing_credit(tmp_path)
+    before = _file_tree(existing.parent)
+    folder, created, backup = workflow.allocate_stress_folder(tmp_path, "a", "Credit")
+    (folder / "partial.xlsx").write_bytes(b"Incomplete")
+    workflow.remove_incomplete_stress_folder(folder, created, backup)
+    assert _file_tree(existing.parent) == before
+
+
+def test_remove_incomplete_stress_folder_logs_backup_when_restore_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    module_records: list[logging.LogRecord],
+) -> None:
+    import bonds_lite_input as workflow
+
+    existing = _existing_credit(tmp_path)
+    before = _file_tree(existing)
+    folder, created, backup = workflow.allocate_stress_folder(tmp_path, "a", "Credit")
+    original = Path.rename
+
+    def rename(path: Path, target: Any) -> Any:
+        if path == backup:
+            raise PermissionError("Restore denied sentinel")
+        return original(path, target)
+
+    monkeypatch.setattr(Path, "rename", rename)
+    with pytest.raises(OSError):
+        workflow.remove_incomplete_stress_folder(folder, created, backup)
+    errors = [record for record in module_records if record.levelno == logging.ERROR]
+    assert len(errors) == 1 and str(backup) in errors[0].getMessage()
+    assert _file_tree(backup) == before
+
+
+@pytest.mark.parametrize("failure", [None, "error", "interrupt"])
+def test_generate_replaces_existing_credit_and_restores_it_on_failure(
+    local_paths: tuple[Path, Path, Path, Path],
+    stress_values: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str | None,
+) -> None:
+    from contextlib import nullcontext
+
+    import bonds_lite_input as workflow
+
+    settings = workflow.StageOneInputs(
+        *local_paths, datetime(2026, 9, 30), "JRL", deepcopy(stress_values),
+        CREDIT_FLAGS, "a",
+    )
+    existing = _existing_credit(local_paths[0].parent)
+    before = _file_tree(existing.parent)
+    error = KeyboardInterrupt() if failure == "interrupt" else BondsLiteError("Sentinel")
+
+    def generate(application: Any, dataset: str, data: Path, snapshot: Any, folder: Path) -> Path:
+        assert snapshot is settings and folder == existing
+        assert not (folder / "JRL MAP" / "py_bonds_Base_Scenario_nozeros_BWS.csv").exists()
+        if failure and dataset == "MAP":
+            raise error
+        path = folder / workflow.INPUT_FILENAMES[dataset]
+        path.write_bytes(f"New {dataset}".encode())
+        return path
+
+    monkeypatch.setattr(
+        workflow, "validate_inputs",
+        lambda book: pytest.fail("Supplied settings must not be validated again"),
+    )
+    monkeypatch.setattr(workflow, "excel_state", lambda application: nullcontext())
+    monkeypatch.setattr(workflow, "_generate_dataset_input", generate)
+    caller = SimpleNamespace(app=object())
+    if failure:
+        with pytest.raises(type(error)):
+            workflow._generate_bonds_lite_input(caller, settings)
+        assert _file_tree(existing.parent) == before
+    else:
+        assert workflow._generate_bonds_lite_input(caller, settings) == existing
+        assert [path.name for path in existing.parent.iterdir()] == ["Credit"]
+        assert _pair_bytes(existing) == {
+            filename: f"New {dataset}".encode()
+            for dataset, filename in workflow.INPUT_FILENAMES.items()
+        }
+        assert {path.name for path in existing.iterdir()} == {
+            *workflow.INPUT_FILENAMES.values(), "JRL Bonds", "JRL MAP",
+        }
+        assert list((existing / "JRL MAP").iterdir()) == []
+
+
+@pytest.mark.parametrize("suffix", ["", "a/b", "..", "name."])
+def test_allocate_stress_folder_rejects_unsafe_suffix_without_writes(
+    tmp_path: Path, suffix: str,
+) -> None:
+    import bonds_lite_input as workflow
+
+    with pytest.raises(BondsLiteError):
+        workflow.allocate_stress_folder(tmp_path, suffix, "Credit")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_allocate_stress_folder_rejects_unregistered_folder(tmp_path: Path) -> None:
+    import bonds_lite_input as workflow
+
+    with pytest.raises(BondsLiteError):
+        workflow.allocate_stress_folder(tmp_path, "a", "Interest")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_allocate_stress_folder_failure_removes_only_new_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bonds_lite_input as workflow
+
+    original = Path.mkdir
+    error = PermissionError("Stress folder denied")
+
+    def mkdir(path: Path, *args: Any, **kwargs: Any) -> None:
+        if path.name == "Credit":
+            raise error
+        original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    with pytest.raises(PermissionError) as caught:
+        workflow.allocate_stress_folder(tmp_path, "a", "Credit")
+    assert caught.value is error
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_remove_incomplete_stress_folder_removes_only_created_folders(
+    tmp_path: Path,
+) -> None:
+    import bonds_lite_input as workflow
+
+    folder, created, _ = workflow.allocate_stress_folder(tmp_path, "new", "Credit")
+    (folder / "partial.xlsx").write_bytes(b"Incomplete")
+    workflow.remove_incomplete_stress_folder(folder, created)
+    assert not (tmp_path / "SST Output_new").exists()
+
+    root = tmp_path / "SST Output_old"
+    root.mkdir()
+    folder, created, _ = workflow.allocate_stress_folder(tmp_path, "old", "Credit")
+    workflow.remove_incomplete_stress_folder(folder, created)
+    assert root.is_dir() and list(root.iterdir()) == []
+
+    folder, created, _ = workflow.allocate_stress_folder(tmp_path, "busy", "Credit")
+    (folder.parent / "Stage 3 staging").mkdir()
+    workflow.remove_incomplete_stress_folder(folder, created)
+    assert not folder.exists()
+    assert (folder.parent / "Stage 3 staging").is_dir()
+
+
+@pytest.mark.parametrize("suffix", ["a", "Q2 2026", "7"])
+def test_portable_output_path_accepts_sst_output_stress_folder(
+    tmp_path: Path, suffix: str,
+) -> None:
+    from bonds_lite_input import portable_output_path
+
+    output = _complete_run(tmp_path / f"SST Output_{suffix}" / "Credit")
+    relative = portable_output_path(tmp_path / "Draft.xlsm", output)
+    assert relative == f"SST Output_{suffix}/Credit"
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "Bonds Lite output/20261028_090000",
+        "SST Output_a/Other",
+        "SST Output_a/credit copy",
+        "Output_a/Credit",
+        "SST Output_/Credit",
+        "SST Outputa/Credit",
+        "nested/SST Output_a/Credit",
+        "SST Output_a/nested/Credit",
+        "SST Output_a/Credit/Credit",
+    ],
+)
+def test_portable_output_path_rejects_non_sst_output_layouts(
+    tmp_path: Path, relative: str,
+) -> None:
+    from bonds_lite_input import portable_output_path
+
+    output = _complete_run(tmp_path / relative)
+    with pytest.raises(BondsLiteError) as caught:
+        portable_output_path(tmp_path / "Draft.xlsm", output)
+    if relative.startswith("Bonds Lite output"):
+        assert "rerun Stage 1" in str(caught.value)
+
+
+@pytest.mark.parametrize("dataset", ["Bonds", "MAP"])
+def test_portable_output_path_rejects_sst_output_with_missing_input(
+    tmp_path: Path, dataset: str,
+) -> None:
+    from bonds_lite_input import portable_output_path
+
+    output = _complete_run(tmp_path / "SST Output_a" / "Credit")
+    (output / EXPECTED_INPUT_FILENAMES[dataset]).unlink()
+    with pytest.raises(BondsLiteError, match=dataset):
+        portable_output_path(tmp_path / "Draft.xlsm", output)
+
+
+@pytest.mark.parametrize("link", ["stress", "root"])
+def test_portable_output_path_rejects_symlinked_sst_output(
+    tmp_path: Path, link: str,
+) -> None:
+    from bonds_lite_input import portable_output_path
+
+    target = _complete_run(tmp_path / "elsewhere" / "Credit")
+    root = tmp_path / "SST Output_a"
+    try:
+        if link == "stress":
+            root.mkdir()
+            (root / "Credit").symlink_to(target, target_is_directory=True)
+        else:
+            root.symlink_to(target.parent, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"Directory symlinks unavailable on this Windows profile: {error}")
+    with pytest.raises(BondsLiteError):
+        portable_output_path(tmp_path / "Draft.xlsm", root / "Credit")
+
+
+@pytest.mark.parametrize(
+    "defect", ["no_flag", "bad_flag", "bad_suffix", "missing_suffix"],
+)
+def test_generate_stops_on_invalid_selection_before_creating_folders(
+    input_controls: Any,
+    stress_values: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    defect: str,
+) -> None:
+    import bonds_lite_input as workflow
+
+    state = input_controls
+    stresses = deepcopy(stress_values)
+    if defect == "no_flag":
+        state.values.update(D16=False, D17=False)
+    elif defect == "bad_flag":
+        state.values["D17"] = "TRUE"
+    elif defect == "bad_suffix":
+        state.values["D66"] = "a/b"
+    else:
+        del state.caller.names["SST_output_folder_suffix"]
+    monkeypatch.setattr(workflow, "read_credit_stresses", lambda caller: stresses)
+    monkeypatch.setattr(
+        workflow, "excel_state",
+        lambda *args: pytest.fail("Invalid selection must stop before Excel setup"),
+    )
+    before = set(state.paths[0].parent.iterdir())
+    with pytest.raises(BondsLiteError):
+        workflow._generate_bonds_lite_input(state.caller)
+    assert set(state.paths[0].parent.iterdir()) == before
+
+
+def test_validate_inputs_captures_flags_and_suffix(
+    input_controls: Any, stress_values: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bonds_lite_input as workflow
+
+    state = input_controls
+    state.values.update(D16=True, D17=False, D66=12.0)
+    monkeypatch.setattr(workflow, "read_credit_stresses", lambda caller: stress_values)
+    settings = workflow.validate_inputs(state.caller)
+    assert settings.stress_flags == {DG_FLAG: True, SPREAD_FLAG: False}
+    assert settings.output_suffix == "12"

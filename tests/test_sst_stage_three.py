@@ -829,7 +829,7 @@ def _stage_three_resolver(
     draft: Path,
     run_folder: Path,
     status: str = "Succeeded",
-    stage_two_run: str = "Bonds Lite output/20261102_111001",
+    stage_two_run: str = "SST Output_a/Credit",
 ) -> _GuardCaller:
     import bonds_lite_input as shared
 
@@ -854,7 +854,7 @@ def _stage_three_resolver(
     monkeypatch.setattr(
         shared,
         "portable_output_path",
-        lambda caller_path, output: "Bonds Lite output/20261102_111001",
+        lambda caller_path, output: "SST Output_a/Credit",
     )
     monkeypatch.setattr(
         shared,
@@ -871,7 +871,7 @@ def test_resolve_stage_three_inputs_accepts_current_stage_two_and_relative_macal
     stage_three = _stage_three()
     draft = tmp_path / "Draft.xlsm"
     draft.write_bytes(b"Draft")
-    run_folder = tmp_path / "Bonds Lite output" / "20261102_111001"
+    run_folder = tmp_path / "SST Output_a" / "Credit"
     run_folder.parent.mkdir()
     caller = _stage_three_resolver(monkeypatch, stage_three, draft, run_folder)
 
@@ -894,7 +894,7 @@ def test_resolve_stage_three_inputs_stops_when_base_scenario_csv_is_missing(
     stage_three = _stage_three()
     draft = tmp_path / "Draft.xlsm"
     draft.write_bytes(b"Draft")
-    run_folder = tmp_path / "Bonds Lite output" / "20261102_111001"
+    run_folder = tmp_path / "SST Output_a" / "Credit"
     run_folder.parent.mkdir()
     caller = _stage_three_resolver(monkeypatch, stage_three, draft, run_folder)
     (run_folder / "JRL MAP" / "py_bonds_Base_Scenario_nozeros_BWS.csv").unlink()
@@ -903,11 +903,38 @@ def test_resolve_stage_three_inputs_stops_when_base_scenario_csv_is_missing(
         stage_three.resolve_stage_three_inputs(caller)
 
 
+def test_resolve_stage_three_inputs_refuses_credit_replaced_by_stage_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Decision 59: a Stage 1 replace removes Stage 2 results; Stage 3 must stop."""
+    import bonds_lite_input as shared
+
+    stage_three = _stage_three()
+    draft = tmp_path / "Draft.xlsm"
+    draft.write_bytes(b"Draft")
+    run_folder = tmp_path / "SST Output_a" / "Credit"
+    run_folder.parent.mkdir()
+    # The earlier Stage 2 succeeded for this same relative run path.
+    caller = _stage_three_resolver(monkeypatch, stage_three, draft, run_folder)
+    assert stage_three.resolve_stage_three_inputs(caller).run_folder == run_folder
+
+    folder, _, backup = shared.allocate_stress_folder(tmp_path, "a", "Credit")
+    assert folder == run_folder
+    (folder / "JRL MAP").mkdir()
+    (folder / shared.INPUT_FILENAMES["MAP"]).write_bytes(b"New MAP")
+    shared.discard_replaced_stress_folder(backup)
+
+    with pytest.raises(stage_three.StageThreeError) as error:
+        stage_three.resolve_stage_three_inputs(caller)
+    assert "rerun Stage 2" in str(error.value)
+
+
 @pytest.mark.parametrize(
     ("status", "stage_two_run"),
     [
-        ("Failed", "Bonds Lite output/20261102_111001"),
-        ("Succeeded", "Bonds Lite output/20261102_091803"),
+        ("Failed", "SST Output_a/Credit"),
+        ("Succeeded", "SST Output_b/Credit"),
     ],
 )
 def test_resolve_stage_three_inputs_rejects_failed_or_stale_stage_two(
@@ -919,7 +946,7 @@ def test_resolve_stage_three_inputs_rejects_failed_or_stale_stage_two(
     stage_three = _stage_three()
     draft = tmp_path / "Draft.xlsm"
     draft.write_bytes(b"Draft")
-    run_folder = tmp_path / "Bonds Lite output" / "20261102_111001"
+    run_folder = tmp_path / "SST Output_a" / "Credit"
     run_folder.parent.mkdir()
     caller = _stage_three_resolver(
         monkeypatch, stage_three, draft, run_folder, status, stage_two_run
@@ -928,7 +955,7 @@ def test_resolve_stage_three_inputs_rejects_failed_or_stale_stage_two(
     with pytest.raises(stage_three.StageThreeError) as error:
         stage_three.resolve_stage_three_inputs(caller)
 
-    assert "20261102_111001" in str(error.value)
+    assert "SST Output_a/Credit" in str(error.value)
     assert stage_two_run in str(error.value)
 
 
@@ -939,7 +966,7 @@ def test_resolve_stage_three_inputs_rejects_relative_mace_and_h44_warning(
     stage_three = _stage_three()
     draft = tmp_path / "Draft.xlsm"
     draft.write_bytes(b"Draft")
-    run_folder = tmp_path / "Bonds Lite output" / "20261102_111001"
+    run_folder = tmp_path / "SST Output_a" / "Credit"
     run_folder.parent.mkdir()
     caller = _stage_three_resolver(monkeypatch, stage_three, draft, run_folder)
     caller.names["SST_MACE_Central_Template"].refers_to_range.value = "MACE.xlsb"
@@ -962,7 +989,7 @@ def test_resolve_stage_three_inputs_rejects_missing_map_file(
     stage_three = _stage_three()
     draft = tmp_path / "Draft.xlsm"
     draft.write_bytes(b"Draft")
-    run_folder = tmp_path / "Bonds Lite output" / "20261102_111001"
+    run_folder = tmp_path / "SST Output_a" / "Credit"
     run_folder.parent.mkdir()
     caller = _stage_three_resolver(monkeypatch, stage_three, draft, run_folder)
     (run_folder / "Bonds Lite input_MAP.xlsx").unlink()
@@ -971,28 +998,37 @@ def test_resolve_stage_three_inputs_rejects_missing_map_file(
         stage_three.resolve_stage_three_inputs(caller)
 
 
-def test_output_filename_joins_run_id_and_token() -> None:
+def test_output_filename_joins_output_suffix_and_token() -> None:
     stage_three = _stage_three()
 
     name = stage_three.output_filename(
-        Path("Bonds Lite output") / "20261103_161318", "3f9c2a7be104d65e"
+        Path("Testing") / "SST Output_a" / "Credit", "3f9c2a7be104d65e"
     )
 
-    assert name == "MACalc input_20261103_161318_3f9c2a7be104d65e.xlsb"
+    assert name == "MACalc input_a_3f9c2a7be104d65e.xlsb"
 
 
-def test_output_filename_keeps_collision_suffix() -> None:
+@pytest.mark.parametrize("suffix", ["Q2 2026", "7", "run_1"])
+def test_output_filename_keeps_suffix_unchanged(suffix: str) -> None:
     stage_three = _stage_three()
 
     name = stage_three.output_filename(
-        Path("Bonds Lite output") / "20261103_161318_001", "3f9c2a7be104d65e"
+        Path(f"SST Output_{suffix}") / "Credit", "3f9c2a7be104d65e"
     )
 
-    assert name == "MACalc input_20261103_161318_001_3f9c2a7be104d65e.xlsb"
+    assert name == f"MACalc input_{suffix}_3f9c2a7be104d65e.xlsb"
 
 
 @pytest.mark.parametrize(
-    "folder", ["", "Bonds Lite output", "20261103", "20261103_161318 copy"]
+    "folder",
+    [
+        "",
+        "Credit",
+        "Bonds Lite output/20261103_161318",
+        "SST Output_/Credit",
+        "Output_a/Credit",
+        "SST Outputa/Credit",
+    ],
 )
 def test_output_filename_rejects_unexpected_run_folder(folder: str) -> None:
     stage_three = _stage_three()
@@ -1017,9 +1053,9 @@ def test_new_output_path_regenerates_token_when_name_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     stage_three = _stage_three()
-    run_folder = tmp_path / "20261103_161318"
-    run_folder.mkdir()
-    (run_folder / "MACalc input_20261103_161318_aaaaaaaaaaaaaaaa.xlsb").write_bytes(
+    run_folder = tmp_path / "SST Output_a" / "Credit"
+    run_folder.mkdir(parents=True)
+    (run_folder / "MACalc input_a_aaaaaaaaaaaaaaaa.xlsb").write_bytes(
         b"existing"
     )
     tokens = iter(["aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"])
@@ -1027,7 +1063,7 @@ def test_new_output_path_regenerates_token_when_name_exists(
 
     path = stage_three.new_output_path(run_folder)
 
-    assert path == run_folder / "MACalc input_20261103_161318_bbbbbbbbbbbbbbbb.xlsb"
+    assert path == run_folder / "MACalc input_a_bbbbbbbbbbbbbbbb.xlsb"
 
 
 def test_new_output_path_stops_when_no_unused_name_is_found(
@@ -1035,9 +1071,9 @@ def test_new_output_path_stops_when_no_unused_name_is_found(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     stage_three = _stage_three()
-    run_folder = tmp_path / "20261103_161318"
-    run_folder.mkdir()
-    (run_folder / "MACalc input_20261103_161318_aaaaaaaaaaaaaaaa.xlsb").write_bytes(
+    run_folder = tmp_path / "SST Output_a" / "Credit"
+    run_folder.mkdir(parents=True)
+    (run_folder / "MACalc input_a_aaaaaaaaaaaaaaaa.xlsb").write_bytes(
         b"existing"
     )
     monkeypatch.setattr(stage_three, "_token", lambda: "aaaaaaaaaaaaaaaa")
@@ -1047,8 +1083,8 @@ def test_new_output_path_stops_when_no_unused_name_is_found(
 
 
 NEW_TOKEN = "0123456789abcdef"
-NEW_OUTPUT_NAME = f"MACalc input_20261102_111001_{NEW_TOKEN}.xlsb"
-EARLIER_OUTPUT_NAME = "MACalc input_20261102_111001_aaaaaaaaaaaaaaaa.xlsb"
+NEW_OUTPUT_NAME = f"MACalc input_a_{NEW_TOKEN}.xlsb"
+EARLIER_OUTPUT_NAME = "MACalc input_a_aaaaaaaaaaaaaaaa.xlsb"
 
 
 def _mock_stage_three_run(
@@ -1068,7 +1104,7 @@ def _mock_stage_three_run(
 
     caller_path = tmp_path / "Draft.xlsm"
     caller_path.write_bytes(b"Draft")
-    run_folder = tmp_path / "Bonds Lite output" / "20261102_111001"
+    run_folder = tmp_path / "SST Output_a" / "Credit"
     run_folder.mkdir(parents=True)
     output = run_folder / NEW_OUTPUT_NAME
     if existing_output:
@@ -1081,7 +1117,7 @@ def _mock_stage_three_run(
     stage_inputs = stage_three.StageThreeInputs(
         caller_path=caller_path,
         run_folder=run_folder,
-        input_run="Bonds Lite output/20261102_111001",
+        input_run="SST Output_a/Credit",
         map_path=run_folder / "Bonds Lite input_MAP.xlsx",
         template_path=tmp_path / "MACalc template.xlsb",
         mace_path=tmp_path / "MACE.xlsb",
@@ -1097,7 +1133,7 @@ def _mock_stage_three_run(
     monkeypatch.setattr(shared, "resolve_stage_input", lambda book: run_folder)
     monkeypatch.setattr(
         shared, "portable_output_path",
-        lambda path, folder: "Bonds Lite output/20261102_111001",
+        lambda path, folder: "SST Output_a/Credit",
     )
     monkeypatch.setattr(stage_three, "require_stage_three_panel", lambda book: None)
     monkeypatch.setattr(
@@ -1183,9 +1219,9 @@ def test_run_stage_three_zero_funded_succeeds_and_warns_without_overwriting_temp
     assert result == output
     assert output.read_bytes() == b"new"
     assert writes[-1]["status"] == "Succeeded"
-    assert writes[-1]["input_run"] == "Bonds Lite output/20261102_111001"
+    assert writes[-1]["input_run"] == "SST Output_a/Credit"
     assert writes[-1]["last_output"] == (
-        f"Bonds Lite output/20261102_111001/{NEW_OUTPUT_NAME}"
+        f"SST Output_a/Credit/{NEW_OUTPUT_NAME}"
     )
     assert "0 funded assets" in messages[-1]
     assert [path.name for path in output.parent.iterdir()] == [NEW_OUTPUT_NAME]
@@ -1209,16 +1245,16 @@ def test_run_stage_three_publishes_one_tokenised_output_and_audits_it(
     published = list(output.parent.iterdir())
     assert len(published) == 1 and published == [result]
     assert re.fullmatch(
-        r"MACalc input_20261102_111001_[0-9a-f]{16}\.xlsb", result.name
+        r"MACalc input_a_[0-9a-f]{16}\.xlsb", result.name
     )
     assert writes[-1]["status"] == "Succeeded"
     assert writes[-1]["last_output"] == (
-        f"Bonds Lite output/20261102_111001/{result.name}"
+        f"SST Output_a/Credit/{result.name}"
     )
 
 
 def _staging_root(tmp_path: Path) -> Path:
-    return tmp_path / "Bonds Lite output" / "Stage 3 staging"
+    return tmp_path / "SST Output_a" / "Stage 3 staging"
 
 
 def test_run_stage_three_stages_in_output_root_outside_run_folder_and_cleans_up(
@@ -1368,7 +1404,7 @@ def test_run_stage_three_rerun_keeps_earlier_output_without_prompting(
         [EARLIER_OUTPUT_NAME, NEW_OUTPUT_NAME]
     )
     assert writes[-1]["last_output"] == (
-        f"Bonds Lite output/20261102_111001/{NEW_OUTPUT_NAME}"
+        f"SST Output_a/Credit/{NEW_OUTPUT_NAME}"
     )
 
 
@@ -1399,8 +1435,8 @@ def test_run_stage_three_rejects_unexpected_run_folder_before_any_write(
     caller, _, writes, messages = _mock_stage_three_run(
         monkeypatch, stage_three, tmp_path, existing_output=False
     )
-    copied = tmp_path / "Bonds Lite output" / "20261102_111001 copy"
-    copied.mkdir()
+    copied = tmp_path / "SST Output copy" / "Credit"
+    copied.mkdir(parents=True)
     monkeypatch.setattr(shared, "resolve_stage_input", lambda book: copied)
 
     with pytest.raises(stage_three.StageThreeError, match="run folder"):
