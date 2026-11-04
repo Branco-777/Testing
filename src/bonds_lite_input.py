@@ -90,7 +90,9 @@ class ModelInput:
     input_hash: str
 
 
-def _validate_packaged_bundle(bundle: Path, release_id: str | None = None) -> dict[str, object]:
+def _validate_packaged_bundle(
+    bundle: Path, release_id: str | None = None
+) -> dict[str, object]:
     """Validate the release manifest and executable hashes for one bundle."""
     manifest_path = bundle / "release.json"
     controller = bundle / "Controller" / "BondsLiteController.exe"
@@ -100,17 +102,29 @@ def _validate_packaged_bundle(bundle: Path, release_id: str | None = None) -> di
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise BondsLiteError(f"Cannot read packaged release manifest: {error}") from error
+        raise BondsLiteError(
+            f"Cannot read packaged release manifest: {error}"
+        ) from error
     if not isinstance(manifest, dict):
         raise BondsLiteError("Packaged release manifest must be a JSON object")
     if release_id is not None and manifest.get("release_id") != release_id:
-        raise BondsLiteError("Packaged release manifest ID does not match the selected release")
-    for path, key in (
+        raise BondsLiteError(
+            "Packaged release manifest ID does not match the selected release"
+        )
+    executables = [
         (controller, "controller_sha256"),
         (model, "model_executable_sha256"),
-    ):
+    ]
+    if "macalc_source_sha256" in manifest or "macalc_executable_sha256" in manifest:
+        macalc = bundle / "MACalc" / "MACalcModel.exe"
+        if not macalc.is_file():
+            raise BondsLiteError(f"Packaged MACalc release is incomplete: {bundle}")
+        executables.append((macalc, "macalc_executable_sha256"))
+    for path, key in executables:
         expected_hash = manifest.get(key)
-        if not isinstance(expected_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+        if not isinstance(expected_hash, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", expected_hash
+        ):
             raise BondsLiteError(f"Packaged release manifest has an invalid {key}")
         if _file_hash(path) != expected_hash:
             raise BondsLiteError(f"Packaged release hash mismatch: {path.name}")
@@ -139,16 +153,7 @@ def load_model_config(caller_path: Path) -> ModelConfig:
         if not model.is_file():
             raise BondsLiteError(f"Packaged model missing from the local cache: {model}")
         return ModelConfig(model, model.parent, packaged=True)
-    setting = os.environ.get("BONDS_LITE_MODEL_PYTHON", "").strip()
-    if not setting:
-        setting = _user_environment_value("BONDS_LITE_MODEL_PYTHON")
-    if not setting:
-        raise BondsLiteError("Set BONDS_LITE_MODEL_PYTHON to the model environment's python.exe")
-    executable = Path(os.path.expandvars(setting)).expanduser()
-    if executable.is_dir():
-        executable = executable / "python.exe"
-    if executable.name.casefold() != "python.exe" or not executable.is_file():
-        raise BondsLiteError(f"Model Python interpreter does not exist: {executable}")
+    executable = resolve_model_python()
     default = (
         Path(caller_path).resolve().parent
         / "../../02 Sensitivities/2025/05 ORSA/Models/Bonds Lite Batch/bonds-hm-cst"
@@ -156,10 +161,31 @@ def load_model_config(caller_path: Path) -> ModelConfig:
     model_setting = os.environ.get("BONDS_LITE_MODEL_DIR", "").strip()
     if not model_setting:
         model_setting = _user_environment_value("BONDS_LITE_MODEL_DIR")
-    model_dir = Path(os.path.expandvars(model_setting or str(default))).expanduser().resolve()
+    model_dir = (
+        Path(os.path.expandvars(model_setting or str(default))).expanduser().resolve()
+    )
     if not model_dir.is_dir() or not (model_dir / "run_bonds_batch.py").is_file():
         raise BondsLiteError(f"Model directory has no run_bonds_batch.py: {model_dir}")
-    return ModelConfig(executable.resolve(), model_dir)
+    return ModelConfig(executable, model_dir)
+
+
+def resolve_model_python() -> Path:
+    """Resolve the configured per-user Python interpreter used by model stages."""
+    setting = os.environ.get("BONDS_LITE_MODEL_PYTHON", "").strip()
+    if not setting:
+        setting = _user_environment_value("BONDS_LITE_MODEL_PYTHON")
+    if not setting:
+        raise BondsLiteError(
+            "Set BONDS_LITE_MODEL_PYTHON to the model environment's python.exe"
+        )
+    executable = Path(os.path.expandvars(setting)).expanduser()
+    if executable.is_dir():
+        executable = executable / "python.exe"
+    if executable.name.casefold() != "python.exe" or not executable.is_file():
+        raise BondsLiteError(
+            f"Model Python interpreter does not exist: {executable}"
+        )
+    return executable.resolve()
 
 
 def preflight_model_environment(config: ModelConfig) -> None:
@@ -848,6 +874,10 @@ Public Sub PrepareMACalc()
     LaunchBondsLite 3
 End Sub
 
+Public Sub RunMACalc()
+    LaunchBondsLite 4
+End Sub
+
 Private Sub LaunchBondsLite(ByVal stage As Long)
     On Error GoTo Failed
     Dim shell As Object
@@ -1111,6 +1141,10 @@ End Sub
 
 Public Sub PrepareMACalc()
     LaunchBondsLite 3
+End Sub
+
+Public Sub RunMACalc()
+    LaunchBondsLite 4
 End Sub
 
 Public Function LocalControllerFullName(ByVal localDraft As String) As String
@@ -2835,11 +2869,12 @@ def main() -> int:
     parser.add_argument("--install-button", type=Path)
     parser.add_argument("--packaged", action="store_true")
     parser.add_argument("--install-stage-three", type=Path)
+    parser.add_argument("--install-stage-four", type=Path)
     parser.add_argument("--caller")
     parser.add_argument("--caller-local", type=Path)
     parser.add_argument("--excel-hwnd", type=int)
     parser.add_argument("--pause", action="store_true", help="Wait for Enter after a run")
-    parser.add_argument("--stage", choices=("1", "2", "3"), default="1")
+    parser.add_argument("--stage", choices=("1", "2", "3", "4"), default="1")
     parser.add_argument("--self-test", action="store_true")
     arguments = parser.parse_args()
     if arguments.install_button:
@@ -2851,6 +2886,12 @@ def main() -> int:
 
         backup = install_stage_three_controls(arguments.install_stage_three)
         logger.info(f"Stage 3 controls installed; original backup: {backup}")
+        return 0
+    if arguments.install_stage_four:
+        from sst_stage_four import install_stage_four_controls
+
+        backup = install_stage_four_controls(arguments.install_stage_four)
+        logger.info(f"Stage 4 controls installed; original backup: {backup}")
         return 0
     if arguments.self_test:
         import openpyxl
@@ -2903,6 +2944,14 @@ def main() -> int:
                     logger.info("Stage 3 cancelled; no MACalc input was written")
                 else:
                     logger.info(f"Stage 3 succeeded; MACalc input saved:\n{output}")
+            elif arguments.stage == "4":
+                from sst_stage_four import run_stage_four
+
+                output = run_stage_four(matches[0])
+                if output is None:
+                    logger.info("Stage 4 cancelled; no MACalc results were written")
+                else:
+                    logger.info(f"Stage 4 succeeded; MACalc results saved:\n{output}")
             else:
                 output = run_stage_one(matches[0])
                 if output is None:

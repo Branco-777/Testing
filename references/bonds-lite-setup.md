@@ -174,7 +174,7 @@ An ISIN list check stops the run before anything is written, and keeps the previ
 - `Stage 3 could not align the MACalc ISIN lists`: a key is blank, an error or not text; a Comp A value is blank, an error, non-numeric or outside 0 to 1; a Comp A duplicate has conflicting values; or an asset row's D is neither its E nor exactly E + `_` + its CSV `Final_Rating`;
 - `MACalc ISIN list read-back failed`: the saved lists, their names or the other cells on `I. Inputs`/`P. Parameters` differ from what was expected.
 
-Before Stage 5 (the Python MACalc run in `MACalc_Batch`) is first used on this output, its planning must confirm that the model reads these lists by the same names and joins them to column D by exact match.
+Stage 4 runs MACalc Batch only after the current Stage 2 and Stage 3 audits pass. The Stage 3 ISIN-list alignment was checked against MACalc's exact-match column-D contract during Stage 4 discovery.
 
 The packaged button needs a controller release that includes Stage 3 (v5 or later). Release v4 rejects `--stage 3`.
 
@@ -375,6 +375,84 @@ Movable-panel verification: 295 default tests passed in 1.58 seconds, with one r
 The run guard is local to the Windows session, not a cross-user/coauthoring lock. Do not have colleagues run stages simultaneously against coauthored copies of the same workbook and assume the Last Run panel is a distributed audit system.
 
 The earlier native-copy benchmark and row-count results are retained in the plan as historical evidence. Revised raw-only row-count/performance fixtures cover the ATT source and wider destination, but were not all rerun this session. A complete intended-data runtime and clean multi-user Excel lifecycle remain separate gates; no whole-run speedup is claimed. This Python-only change does not require reinstalling the button.
+
+## Stage 4 - Run MACalc
+
+Stage 4 runs the existing MACalc Batch model on the exact workbook recorded in `SST_Stage3_LastSuccessfulOutput`. Keep the Draft open in desktop Excel so the launcher can read the saved audit. Stage 4 stops if Stage 2 or Stage 3 is unsuccessful or stale, the workbook is missing or locked, or MACalc Batch would find more than the audited workbook.
+
+The Stage 4 panel records Last Run, Start, Finish, Time, User, Status, Input Run and Last Successful Output. Input Run names the Stage 3 workbook; Last Successful Output names the results CSV. Stage 4 changes only its own `SST_Stage4_*` audit fields.
+
+### Prerequisites and configuration
+
+- Stage 2 and Stage 3 must have succeeded for the current Stage 1 run.
+- Close the audited MACalc input workbook in every Excel window. Leave the Draft open.
+- Set the per-user `BONDS_LITE_MODEL_PYTHON` variable to the MACalc environment's Python 3.11 `python.exe`. Stage 4 uses the same setting as Stage 2; it does not use the controller's Python for model imports.
+- Optionally set `SST_MACALC_DIR` to the MACalc Batch folder. By default, Stage 4 looks for `MACalcrunmanager.py` at `<Draft folder>\..\..\00 Ad Hoc\MACalc_Batch`.
+
+### Install the controls
+
+With the Draft closed, run this from the project's `src` folder:
+
+```powershell
+python -m bonds_lite_input --install-stage-four "Draft Input spreadsheet for SST.xlsm"
+```
+
+The installer backs up the Draft under `references\backups` before adding the Stage 4 panel, **Run MACalc** button and `RunMACalc` macro. It requires the Stage 3 panel and stops rather than overwriting occupied cells. The button requires a controller release that supports `--stage 4`; the current Stage 1-3 release does not yet include Stage 4. Once a Stage 4-capable release is approved, the button launches that controller with `--stage 4`.
+
+### Run from source
+
+Until a Stage 4 controller release is approved, run from the project's `src` folder with the Draft open in desktop Excel:
+
+```powershell
+python -u -m bonds_lite_input --caller "<Excel Workbook.FullName>" --caller-local "C:\path\to\Draft Input spreadsheet for SST.xlsm" --excel-hwnd <Excel-window-handle> --stage 4
+```
+
+Use the Python 3.13 controller interpreter for `python`. Set `--caller` to the exact `Workbook.FullName` reported by Excel; for a OneDrive-synced Draft this can be a SharePoint URL. Set `--caller-local` to the Draft's local synced filesystem path. The window handle is the `Application.Hwnd` of the Excel instance containing the Draft. The installed button cannot run Stage 4 until a Stage 4-capable controller release is approved.
+
+### Maintainers: package Stage 4
+
+The Stage 4 bundle adds `MACalc\MACalcModel.exe` alongside the existing
+`Controller` and `Model` folders. The builder requires `--macalc-dir` pointing
+to the accepted MACalc Batch working copy, as well as `--model-dir` for Bonds
+Lite. It uses the isolated Python 3.11 model build environment for both models.
+The model build requirements include `pulp==3.2.2` and `smithwilson==0.2.0`;
+refresh that isolated environment before an approved build. Do not install
+these dependencies into the external MACalc working copy's environment.
+
+The MACalc self-test imports the bundled model and checks CBC availability
+without opening Excel. The builder records the six MACalc source hashes and
+the MACalc executable hash in `release.json`, and refuses publication if
+the sources change during the build. Frozen runs use the bundled modules;
+they do not require the external model folder, Python installation or git.
+The controller validates the MACalc executable against the manifest before
+dispatching a packaged stage.
+
+Commit, build, promotion and the packaged button run are separate approval
+gates. Build under a new release ID without `--promote`, verify all three
+self-tests, and obtain approval before changing `current.txt`. The active
+release remains `20261104-cache-v9` until promotion is authorised. For the
+packaged acceptance run, first rerun Stage 3 for a clean input and archive
+older MACalc inputs outside the stress folder; follow the checks in the
+[Stage 4 handoff](session-handoff-2026-11-04-stage-four.md).
+
+### Input, backup and outputs
+
+MACalc Batch runs in place on the audited workbook in `SST Output_<suffix>\Credit`. It does not create a separate Stage 4 input copy. Before each run, Stage 4 replaces the one backup at `SST Output_<suffix>\Stage 4 backup\<workbook name>`. It does not accumulate timestamped backups. If you rerun Stage 4 without rerunning Stage 3 first, the backup contains the prior Stage 4 result; rerun Stage 3 when you need a clean input.
+
+The expected result is `<workbook stem>_unoptimised_assets.csv` beside the workbook. MACalc runs with binary optimisation OFF, the optimisation pass OFF and the cost-of-default floor ON. The Draft's `SST_Credit_DG_standalone` value is passed as the downgrade flag; that option is currently inactive while optimisation is OFF. A successful process and a non-empty CSV confirm execution, not the reasonableness of the figures. Review the results before sign-off.
+
+Stage 3 keeps earlier token-named `MACalc input_*` workbooks in `Credit`. MACalc Batch scans recursively, so Stage 4 requires exactly one matching workbook: the audited Stage 3 output. Before running, archive or remove older MACalc inputs from `Credit`; moving them to a subfolder inside `Credit` does not help. Keep any archive outside the stress folder, for example in `SST Output_<suffix>\Stage 3 archive`.
+
+### Troubleshooting
+
+| Message or symptom | Action |
+| --- | --- |
+| `Stage 3 is stale or unsuccessful; rerun Stage 3` | Rerun Stage 3 after Stage 2 succeeds for the current Stage 1 run. |
+| `Stage 3 workbook is locked or open in Excel` | Close that MACalc input workbook in every Excel window, then retry. |
+| `MACALC Batch must find exactly the audited Stage 3 workbook` | Archive or remove earlier `MACalc input_*` files from the stress folder; do not move them into a subfolder of `Credit`. |
+| `Set BONDS_LITE_MODEL_PYTHON to the model environment's python.exe` | Set the per-user variable to the existing Python 3.11 interpreter and open a new console. |
+| `MACalc environment preflight failed` | Check that `BONDS_LITE_MODEL_PYTHON` is valid and that the configured MACalc Batch directory contains importable model modules. Set `SST_MACALC_DIR` if the default folder is not correct. |
+| `MACalc Batch exited with code 1` | Read the traceback in the console. The automatic backup contains the workbook as it was immediately before this attempt. |
 
 ## Glossary
 

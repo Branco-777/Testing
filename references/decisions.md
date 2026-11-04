@@ -457,6 +457,7 @@ Requirements confirmed on 27 October 2026. Implementation decisions added on 28 
 **Choice:** No. The output will feed the Python MACalc in `C:\Users\Joao Branco\OneDrive - Just Group\Financial Resilience Team - General\00 Ad Hoc\MACalc_Batch`, Stage 5 is the run of that model on the MACalc input once Stage 3 has validated it. That model is not read, changed or run in Stage 3. Slice C is specified against the template's contract: the lists keyed on `I. Assets` D, with an exact match. Before Stage 5's first run, its planning also confirms the join, the list set and the duplicate-key behaviour, and any gap reopens Slice C.
 **Alternatives considered:** (a) Read the new model now and block Slice C on it. Rejected by the user: no work on that model before Stage 5. (b) Treat `v_3_3` as authoritative. Rejected, because it is not the consuming model.
 **Rationale:** This keeps Stage 3 independent of Stage 5, and the template contract is the interface that both must honour.
+**Status (4 November 2026):** "Stage 5" here is the work the user now calls **Stage 4** (Decision 67). The deferred checks were done read-only on 4 November against `MACalc_Batch` and the live Stage 3 output, and every one passed; Slice C is not reopened. The evidence is in `references/plan-stage-four.md`, "Verified Discovery".
 
 ### Decision 52: Slice C Duplicate Handling And Plan Approval (2026-11-03)
 **Question:** How should Slice C handle duplicate keys in the Comp A tables, and is the Slice C plan approved?
@@ -555,3 +556,157 @@ Earlier Stage 2 results and Stage 3 MACalc inputs inside the replaced folder are
 - Delete the old folder before generating: rejected because a failed run would then lose the earlier output too.
 - Ask before overwriting: rejected because the user asked for a plain overwrite.
 **Rationale:** Gives the requested overwrite while keeping the previous output if the replacement run fails.
+
+## Stage 4 Decisions (MACalc Batch On The Stage 3 Output)
+
+### Decision 60: Stage 4 Starts As A Source-Mode Launcher (2026-11-04)
+**Question:** Q4-1. Should Stage 4 start as a terminal launcher, or be fully integrated now (`--stage 4`, a Draft button, audit cells and a release)?
+**Decided by:** User, 4 November 2026.
+**Choice:** Option (a). First build a source-mode Python launcher, run from the terminal, that runs MACalc Batch on the audited Stage 3 output. The Draft button, audit cells, VBA, packaging and release come later, under a separate agreement.
+**Alternatives considered:** (b) Full integration now. Deferred: it changes the Draft and needs a release before it is known that the model runs on Stage 3 output.
+**Rationale:** The smallest step that proves the handoff works.
+**Superseded in part by:** Decision 76. The user asked on 4 November 2026 for a Stage 4 button, audit panel and `--stage 4` dispatch in the same fashion as Stages 1-3. Building and promoting a packaged release still needs separate approval.
+
+### Decision 61: MACalc Batch Runs In Place In The Stress Folder (2026-11-04)
+**Question:** Q4-2. MACalc Batch saves over its input workbook and scans its folder recursively for `MACalc*` workbooks. Should Stage 4 copy the audited file into its own folder, or run in place?
+**Decided by:** User, 4 November 2026.
+**Choice:** Option (b). Run MACalc Batch on `SST Output_<suffix>\<stress folder>` (today `Credit`), in place on the audited Stage 3 workbook. MACalc's results are written into that workbook, and the CSV export is written beside it. The audited file is therefore changed by Stage 4.
+**Alternatives considered:** (a) Copy into a `Stage 4` subfolder. Rejected by the user in favour of keeping everything in one folder (Decision 65).
+**Rationale:** Keeps one self-contained output folder for each stress, ready for a future single run of all stages.
+**Consequence:** The scan finds every `MACalc*` workbook under the folder, so Decision 62 makes the launcher stop when it finds anything other than the audited file. Stage 3 keeps earlier outputs (Decision 54, Q-D2), so after a Stage 3 rerun the user must remove or archive the earlier `MACalc input_*` files (or rerun Stage 1-3 with the same suffix) before Stage 4 runs. The launcher never deletes them.
+
+### Decision 62: Automatic Confirmation Only For The Single Audited Workbook (2026-11-04)
+**Question:** MACalc Batch asks `Proceed with these workbooks? [y/N]` through `input()`. May the launcher answer it?
+**Decided by:** User, 4 November 2026.
+**Choice:** The launcher answers `y` if, and only if, MACalc Batch's own workbook list contains exactly one workbook and that workbook is the path in `SST_Stage3_LastSuccessfulOutput`. Otherwise it answers no, lists what was found and stops with an error; nothing is run.
+**Alternatives considered:** Always answer `y` (rejected: could run stale or unrelated workbooks); always leave the prompt to the user (rejected: unnecessary when the input is proven).
+**Rationale:** Automation is safe only when the model will run exactly the audited input.
+
+### Decision 63: Stage 4 Run Options (2026-11-04)
+**Question:** Q4-3. Which MACalc Batch options should Stage 4 use, and should `SST_Credit_DG_standalone` drive the downgrade-run option?
+**Decided by:** User, 4 November 2026.
+**Choice:** `is_downgrade_run` = the Draft's `SST_Credit_DG_standalone` (an Excel TRUE/FALSE, read like Stage 1 reads it). Everything else stays at the MACalc Batch defaults during development: no binary optimisation, no optimisation pass, CoD floor at zero. A future Draft flag will say whether MACalc should optimise; it does not exist yet.
+**Alternatives considered:** Use all defaults, including no downgrade run (rejected: the user wants the flag to drive it).
+**Rationale:** Ties the model option to the Draft's stress selection now, so the future optimisation flag only needs to switch the optimisation pass on.
+**Finding (agent, read-only, 4 November):** In the current MACalc Batch code, `is_downgrade_run` is read only by the optimiser (`MACE.reoptimise`, which groups downgraded infrastructure/PP rows under one binary variable). With the optimisation pass off it has no effect on the base-run results. The launcher still passes it and logs that it is inactive while optimisation is off.
+
+### Decision 64: Stage 4 Proof Of Correctness (2026-11-04)
+**Question:** Q4-4. What shows that a Stage 4 run is correct?
+**Decided by:** User, 4 November 2026.
+**Choice:** At this stage, a run that completes without errors and produces the expected artefacts: the workbook saved in place with MACalc's results, and `<stem>_unoptimised_assets.csv` beside it. The user then checks whether the numbers are reasonable. There is no numerical reference or tolerance yet.
+**Alternatives considered:** A manual MACalc run, a previous SST result, or named SCR/MA figures. Deferred by the user until the run itself is established.
+**Rationale:** Establish a clean run before judging the figures.
+
+### Decision 65: Stale Stage 3 Handoff Stops Stage 4 (2026-11-04)
+**Question:** Q4-5. If the latest Stage 3 attempt failed but `SST_Stage3_LastSuccessfulOutput` still names an older successful output, what should Stage 4 do?
+**Decided by:** User, 4 November 2026.
+**Choice:** Option (a). Stop and ask the user to rerun Stage 3. Stage 4 runs only when `SST_Stage3_Status` is `Succeeded`, `SST_Stage3_InputRun` is the current Stage 1 run, Stage 2 has succeeded for that run, and the output file exists.
+**Alternatives considered:** (b) Run on the older output with a warning. Rejected.
+**Rationale:** Consistent with how Stage 3 treats Stage 2.
+
+### Decision 66: Stage 4 Output Stays In The Stress Folder (2026-11-04)
+**Question:** Q4-6. Where should MACalc results go, and may a Stage 4 rerun replace earlier Stage 4 results?
+**Decided by:** User, 4 November 2026.
+**Choice:** Everything stays in the same stress folder, as centralised as possible, because all stages will later run in one go. A Stage 4 rerun replaces the previous Stage 4 results: MACalc rewrites its output sheets in the same workbook and overwrites the CSV. A Stage 1 rerun with the same suffix clears them with the rest of the folder (Decision 59).
+**Alternatives considered:** A separate `Stage 4` subfolder, or keeping each rerun's results. Rejected.
+**Rationale:** One self-contained folder per stress.
+
+### Decision 67: `_opt` Suffix Not Guarded; Stage Numbering (2026-11-04)
+**Question:** Q4-7. MACalc Batch skips files whose names contain `_opt`. Should Stage 1 reject such a suffix, or Stage 4 stop? Also, older documents call this work "Stage 5".
+**Decided by:** User for `_opt`, 4 November 2026. The numbering note is the agent's record of the user's instruction in the Stage 4 handoff.
+**Choice:** No `_opt` guard for now; the user considers that suffix very unlikely. If it happens, MACalc Batch finds no workbook and Decision 62 stops the launcher with a message that lists nothing found. "Stage 5" in Decision 51, the Stage 3 plan and the setup guide means **Stage 4**, the run of MACalc Batch on the Stage 3 output.
+**Alternatives considered:** Reject `_opt` suffixes in Stage 1, or add a dedicated Stage 4 check. Deferred.
+**Rationale:** Not worth the extra rule today.
+
+### Decision 68: Separate Stage 4 Controller And Model Entry (2026-11-04)
+**Question:** P4-1. Should Stage 4 use two modules for the controller and the MACalc Batch child, or one module with two modes?
+**Decided by:** User, 4 November 2026.
+**Choice:** Use two modules: `src/sst_stage_four.py` under the controller's Python 3.13 and `src/macalc_batch_entry.py` under the model's Python 3.11.
+**Alternatives considered:** One module with controller and child modes. Rejected because it would need to support two Python environments and combine distinct responsibilities.
+**Rationale:** The controller and MACalc Batch require different dependency environments; separating their entry points keeps each process aligned with its Python runtime.
+
+### Decision 69: Reuse The Existing Model Python Setting (2026-11-04)
+**Question:** P4-2. How should the MACalc Python configuration work for another user, and should Stage 4 add a separate interpreter setting?
+**Decided by:** User, 4 November 2026.
+**Choice:** Reuse the per-user `BONDS_LITE_MODEL_PYTHON` setting and its existing environment/registry resolution for the MACalc Batch child. Keep `SST_MACALC_DIR` optional, defaulting to the model folder relative to the Draft.
+**Alternatives considered:** Add a required `SST_MACALC_PYTHON` setting. Rejected to avoid duplicate per-user configuration while Stage 2 and MACalc Batch use the same Python environment.
+**Rationale:** The existing setting is user-specific, so each direct-source user can point it to their own Python 3.11 interpreter; no machine-specific path is embedded in Stage 4. A separate setting can be added if the models later require different interpreters.
+
+### Decision 70: Guard MACalc Batch Confirmation Against The Audited Input (2026-11-04)
+**Question:** P4-3. How should Stage 4 safely answer MACalc Batch's workbook confirmation prompt?
+**Decided by:** User, 4 November 2026.
+**Choice:** In the child process, answer yes only when the exact list MACalc Batch is about to run contains exactly the audited Stage 3 workbook; otherwise stop. Pre-scan the folder for a clear early error.
+**Alternatives considered:** Pipe `y` to standard input after a pre-scan. Rejected because that would not bind confirmation to the actual list passed to MACalc Batch.
+**Rationale:** Prevents an unreviewed workbook from being run and preserves the user's single-input confirmation rule without editing MACalc Batch.
+
+### Decision 71: Record Model Provenance Without Modifying It (2026-11-04)
+**Question:** P4-4. How should Stage 4 identify the exact MACalc Batch code used while leaving its working copy untouched?
+**Decided by:** User, 4 November 2026.
+**Choice:** Run with bytecode writing disabled and log the model Git HEAD, modified/clean state, and SHA-256 hashes of the six specified model files.
+**Alternatives considered:** Modify or clean the model repository, or record only its commit. Rejected because the model must not be changed and its current working tree has uncommitted changes.
+**Rationale:** The recorded hashes identify the actual working-copy code while the no-bytecode settings avoid incidental files in the model folder.
+
+### Decision 72: Preflight MACalc Batch Before Launch (2026-11-04)
+**Question:** P4-5. What must be checked before Stage 4 modifies the workbook?
+**Decided by:** User, 4 November 2026.
+**Choice:** Stop if a matching Excel lock file exists beside the audited workbook; verify that the configured interpreter is Python 3.11 and can import `MACalcrunmanager` from the model folder.
+**Alternatives considered:** Launch MACalc Batch without these checks. Rejected because an open workbook or unusable environment would make the in-place run fail or behave unpredictably.
+**Rationale:** Catch the known workbook and environment blockers before invoking the model.
+
+### Decision 73: Run Stage 4 From A Source-Mode CLI (2026-11-04)
+**Question:** P4-6. How should the user invoke Stage 4 in this planning scope?
+**Decided by:** User, 4 November 2026.
+**Choice:** Provide `python -m sst_stage_four --draft "<local Draft path>"`. Require the Draft to be open in desktop Excel, resolve the exact open workbook, read its live audit and do not write to the Draft.
+**Alternatives considered:** Add a Draft button or integrate `--stage 4` now. Deferred; the user selected a source-mode launcher first (Decision 60).
+**Rationale:** Reuses the live Draft audit while keeping this stage self-contained and out of the release and VBA surfaces.
+**Superseded by:** Decision 76. Stage 4 now starts from a Draft button through `bonds_lite_input --stage 4`, like Stages 1-3, and writes its own `SST_Stage4_*` audit cells. The separate `python -m sst_stage_four` command is dropped.
+
+### Decision 74: Replace One Automatic Pre-Run Backup (2026-11-04)
+**Question:** P4-7. Because MACalc runs in place, should the user make a manual backup, should the launcher manage one, or should there be no backup?
+**Decided by:** User, 4 November 2026.
+**Choice:** Before every Stage 4 run, automatically copy the audited workbook to `SST Output_<suffix>\Stage 4 backup\<same workbook name>`. Replace that same backup file on each run; do not accumulate versioned backups. The backup remains outside the `Credit` scan folder.
+**Alternatives considered:** Ask the user to make a one-time manual copy (rejected in favour of consistent automatic protection); make no backup and rely on rerunning Stage 3 or OneDrive history (rejected).
+**Rationale:** Preserves the pre-run workbook for recovery or comparison while keeping only one backup per input and ensuring MACalc Batch cannot discover it as another input.
+
+### Decision 75: Stream MACalc Output Without A Timeout (2026-11-04)
+**Question:** P4-8. Should the child process have a timeout, and how should its output be presented?
+**Decided by:** User, 4 November 2026.
+**Choice:** Stream child output to the console and impose no timeout. Ctrl+C is the user-controlled interruption.
+**Alternatives considered:** Set a fixed timeout. Rejected because the live run duration is unknown and a valid calculation could exceed an arbitrary limit.
+**Rationale:** Keeps the user informed without prematurely terminating a long calculation.
+
+### Decision 76: Stage 4 Button And Audit Panel Like Stages 1-3 (2026-11-04)
+**Question:** Should Stage 4 also have a Draft button, in the same fashion as the other stages?
+**Decided by:** User, 4 November 2026 (the request). Decision 77's implementation details were initially proposed by the agent and approved by the user at 14:30.
+**Choice:** Stage 4 gets the same integration as Stage 3:
+- a **Run MACalc** button on `I. Control`;
+- an `SST_Stage4_*` audit panel below the Stage 3 panel;
+- a `RunMACalc` VBA macro that calls `LaunchBondsLite 4`;
+- `--stage 4` dispatch in `bonds_lite_input.main`;
+- an `--install-stage-four` installer, run with the Draft closed after a backup.
+
+The packaged controller and a new packaged MACalc model app are built, and the release promoted, only after the source-mode live run passes and with separate approval, as for Stage 3. Supersedes the deferral in Decision 60 and the CLI-only entry and no-Draft-writes rule in Decision 73.
+**Alternatives considered:**
+- Keep the source-mode CLI and add the button later: rejected by the user's request.
+- Add the button without an audit panel: rejected because it would differ from Stages 1-3, and the user asked for the same fashion.
+- Install the button in the Draft now, before Stage 4 code exists: rejected because the active release `20261104-cache-v9` rejects `--stage 4`, and this session's instruction forbids changing the Draft.
+**Rationale:** One consistent way to start every stage, with an audit trail in the Draft, while the order (tests, code, source live run, then release) protects colleagues from a broken button.
+
+## Agent-made decisions pending user approval
+
+### Decision 77: Stage 4 Button, Panel And Packaging Details (2026-11-04)
+**Question:** Which names, audit fields and packaging approach should the Stage 4 button use?
+**Decided by:** User, 4 November 2026 at 14:30.
+**Choice:**
+- **Names:** button `btnRunMACalc`, caption `Run MACalc`, macro `RunMACalc`, panel heading `Stage 4 - Run MACalc`, panel name `SST_Stage4_Panel`.
+- **Audit fields:** the same eight as Stage 3: `SST_Stage4_LastRun`, `Start`, `Finish`, `Elapsed`, `User`, `Status`, `InputRun` and `LastSuccessfulOutput`.
+  - `InputRun` holds the portable path of the audited Stage 3 workbook.
+  - `LastSuccessfulOutput` holds the portable path of `<stem>_unoptimised_assets.csv`.
+  - Status goes `Running`, then `Succeeded`, `Failed` or `Interrupted`. The Draft is saved after each change, as in Stage 3.
+- **Placement and installer:** use the Stage 3 code, `_install_stage_three_panel` and `_stage_three_button_row`, with the same occupancy and overlap checks. Placement is relative to the Stage 3 panel and button. The installer inserts `RunMACalc` into `modBondsLiteLauncher` only if it is missing. `VBA_LAUNCHER` and `PACKAGED_VBA_LAUNCHER` also gain `RunMACalc`.
+- **Packaged runtime:** `tools/build_packaged_stages.py` builds a third app, `MACalc/MACalcModel.exe`, from `src/macalc_batch_entry.py` under the model Python. It bundles a snapshot of the MACalc Batch sources taken at build time and pulp's solver data. Their SHA-256 hashes go in `release.json`, which replaces P4-4's run-time git and hash check in packaged mode. In frozen mode, `load_macalc_config` resolves `MACalc/MACalcModel.exe` beside `Controller`.
+**Alternatives considered:**
+- Panel fields named after Stage 2 (`LastSuccessfulResults`): rejected; Stage 3 is the closer pattern.
+- `LastSuccessfulOutput` = the workbook: rejected because it already equals `InputRun` (in place, Decision 61); the CSV is the new artefact.
+- Running MACalc from the shared OneDrive folder in packaged mode: rejected because the release design never runs code from the sync tree, and colleagues have no model Python.
+**Rationale:** Mirrors Stage 3, so the code, tests and user experience match, and keeps the packaged release self-contained.

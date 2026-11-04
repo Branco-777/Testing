@@ -8,3 +8,5 @@ llvmlite==0.44.0
 xlwings==0.36.14
 pywin32==308
 python-dateutil==2.9.0.post0
+pulp==3.2.2
+smithwilson==0.2.0

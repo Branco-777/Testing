@@ -1439,6 +1439,62 @@ def test_validate_packaged_bundle_checks_local_manifest_and_executable_hashes(
         workflow._validate_packaged_bundle(bundle, "20261030-stages-v1")
 
 
+@pytest.mark.parametrize("state", ["valid", "missing", "tampered"])
+def test_validate_packaged_bundle_checks_optional_macalc_executable(
+    tmp_path: Path,
+    state: str,
+) -> None:
+    import hashlib
+
+    import bonds_lite_input as workflow
+
+    bundle = _create_packaged_release(tmp_path / "release source")
+    macalc = bundle / "MACalc" / "MACalcModel.exe"
+    macalc.parent.mkdir()
+    macalc.write_bytes(b"MACalc executable sentinel")
+    manifest_path = bundle / "release.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["macalc_executable_sha256"] = hashlib.sha256(
+        macalc.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    if state == "missing":
+        macalc.unlink()
+    elif state == "tampered":
+        macalc.write_bytes(b"tampered MACalc")
+
+    if state == "valid":
+        assert workflow._validate_packaged_bundle(bundle) == manifest
+    else:
+        with pytest.raises(
+            BondsLiteError, match=r"(?i)incomplete|missing|hash mismatch"
+        ):
+            workflow._validate_packaged_bundle(bundle)
+
+
+@pytest.mark.parametrize(
+    "digest",
+    [None, 42, "", "a" * 63, "a" * 65, "A" * 64, "g" * 64],
+)
+def test_validate_packaged_bundle_rejects_invalid_optional_macalc_digest(
+    tmp_path: Path,
+    digest: object,
+) -> None:
+    import bonds_lite_input as workflow
+
+    bundle = _create_packaged_release(tmp_path / "release source")
+    macalc = bundle / "MACalc" / "MACalcModel.exe"
+    macalc.parent.mkdir()
+    macalc.write_bytes(b"MACalc executable sentinel")
+    manifest_path = bundle / "release.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["macalc_executable_sha256"] = digest
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(BondsLiteError, match=r"(?i)invalid.*macalc_executable_sha256"):
+        workflow._validate_packaged_bundle(bundle)
+
+
 def test_packaged_launcher_uses_release_only_as_copy_source_and_launches_cache() -> None:
     import bonds_lite_input as workflow
 
@@ -1480,9 +1536,26 @@ def test_packaged_launcher_checks_central_pointer_once_per_excel_session() -> No
     assert "Copying Bonds Lite application" in launcher
 
 
+@pytest.mark.parametrize(
+    "changed_macalc_source",
+    [
+        None,
+        "MACalcrunmanager.py",
+        "MACalc.py",
+        "MACE.py",
+        "calcSCR.py",
+        "calcmp.py",
+        "MACalcutils.py",
+    ],
+)
 def test_packaged_builder_publishes_versioned_central_copy_source(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed_macalc_source: str | None,
 ) -> None:
+    import hashlib
+
+    from macalc_batch_entry import PROVENANCE_FILES
     from tools import build_packaged_stages as builder
 
     project = Path(__file__).resolve().parents[1]
@@ -1490,44 +1563,125 @@ def test_packaged_builder_publishes_versioned_central_copy_source(
     model_dir.mkdir()
     for name in ("run_bonds_batch.py", "BondsModelHandler.py", "pyBondsHMutils.py"):
         (model_dir / name).write_text("source sentinel", encoding="utf-8")
+    macalc_dir = tmp_path / "MACalc Batch"
+    macalc_dir.mkdir()
+    for name in PROVENANCE_FILES:
+        (macalc_dir / name).write_text(f"# MACalc sentinel: {name}\n", encoding="utf-8")
+    macalc_hashes = {
+        name: hashlib.sha256((macalc_dir / name).read_bytes()).hexdigest()
+        for name in PROVENANCE_FILES
+    }
+    model_python = tmp_path / "model py311" / "python.exe"
+    model_python.parent.mkdir()
+    model_python.write_bytes(b"model Python sentinel")
     release_root = tmp_path / "central release source"
+    release_root.mkdir()
+    (release_root / "current.txt").write_text("previous-release", encoding="ascii")
     monkeypatch.setattr(builder, "CENTRAL_RELEASE_ROOT", release_root, raising=False)
+    builds: list[dict[str, Any]] = []
+    self_tests: list[tuple[list[str], Path]] = []
 
     def build_application(
-        python: Path, entry: Path, name: str, build_root: Path, dist: Path,
-        project: Path, model: Path | None = None, clean: bool = False,
+        python: Path,
+        entry: Path,
+        name: str,
+        build_root: Path,
+        dist: Path,
+        project: Path,
+        model: Path | None = None,
+        clean: bool = False,
+        **kwargs: Any,
     ) -> Path:
+        builds.append({"python": python, "entry": entry, "name": name, "model": model})
         application = dist / name
         application.mkdir(parents=True)
-        (application / f"{name}.exe").write_bytes(b"executable sentinel")
+        (application / f"{name}.exe").write_bytes(f"{name} executable".encode("ascii"))
+        if name == "MACalcModel" and changed_macalc_source is not None:
+            (macalc_dir / changed_macalc_source).write_text(
+                "# changed during build\n", encoding="utf-8"
+            )
         return application
 
+    def self_test(command: list[str], cwd: Path, **kwargs: Any) -> str:
+        self_tests.append((command, cwd))
+        assert Path(command[0]).is_file()
+        return "self-test passed"
+
     monkeypatch.setattr(builder, "build", build_application)
-    monkeypatch.setattr(builder, "run", lambda *args, **kwargs: "self-test passed")
+    monkeypatch.setattr(builder, "run", self_test)
     monkeypatch.setattr(
         builder, "collect_licences",
         lambda python, destination, project: destination.mkdir(parents=True),
     )
     monkeypatch.setattr(
-        sys, "argv",
+        sys,
+        "argv",
         [
-            "build_packaged_stages", "--controller-python", sys.executable,
-            "--model-python", sys.executable, "--model-dir", str(model_dir),
-            "--build-root", str(tmp_path / "build cache"),
-            "--release-id", "test-local-cache-source", "--promote",
+            "build_packaged_stages",
+            "--controller-python",
+            sys.executable,
+            "--model-python",
+            str(model_python),
+            "--model-dir",
+            str(model_dir),
+            "--macalc-dir",
+            str(macalc_dir),
+            "--build-root",
+            str(tmp_path / "build cache"),
+            "--release-id",
+            "test-local-cache-source",
+            "--promote",
         ],
     )
 
+    release = release_root / "releases" / "test-local-cache-source" / "Bonds Lite App"
+    if changed_macalc_source is not None:
+        with pytest.raises(RuntimeError, match=r"(?i)MACalc.*source.*changed"):
+            builder.main()
+        assert not release.parent.exists()
+        assert (release_root / "current.txt").read_bytes() == b"previous-release"
+        return
+
     assert builder.main() == 0
 
-    release = release_root / "releases" / "test-local-cache-source" / "Bonds Lite App"
     assert (release / "release.json").is_file()
     assert (release / "Controller" / "BondsLiteController.exe").is_file()
     assert (release / "Model" / "BondsLiteModel.exe").is_file()
+    macalc_exe = release / "MACalc" / "MACalcModel.exe"
+    assert macalc_exe.is_file()
+    assert [call["name"] for call in builds] == [
+        "BondsLiteController",
+        "BondsLiteModel",
+        "MACalcModel",
+    ]
+    assert builds[2]["python"] == model_python.resolve()
+    assert builds[2]["entry"] == project / "src" / "macalc_batch_entry.py"
+    assert builds[2]["model"] == macalc_dir.resolve()
+    assert {
+        (Path(command[0]).parent.name, Path(command[0]).name, tuple(command[1:]))
+        for command, _ in self_tests
+    } == {
+        ("Controller", "BondsLiteController.exe", ("--self-test",)),
+        ("Model", "BondsLiteModel.exe", ("--self-test",)),
+        ("MACalc", "MACalcModel.exe", ("--self-test",)),
+    }
+    assert all(cwd.name == "Bonds Lite App" for _, cwd in self_tests)
+    manifest = json.loads((release / "release.json").read_text(encoding="utf-8"))
+    assert len(macalc_hashes) == 6
+    assert manifest["macalc_source_sha256"] == macalc_hashes
+    assert (
+        manifest["macalc_executable_sha256"]
+        == hashlib.sha256(macalc_exe.read_bytes()).hexdigest()
+    )
+    assert set(manifest["layout"].split("; ")) == {
+        "Controller/BondsLiteController.exe",
+        "Model/BondsLiteModel.exe",
+        "MACalc/MACalcModel.exe",
+    }
     assert (release_root / "current.txt").read_bytes() == b"test-local-cache-source"
 
 
-def test_pyinstaller_command_hidden_imports_stage_three_in_controller_only(
+def test_pyinstaller_command_hidden_imports_stages_three_and_four_in_controller_only(
     tmp_path: Path,
 ) -> None:
     from tools import build_packaged_stages as builder
@@ -1544,7 +1698,60 @@ def test_pyinstaller_command_hidden_imports_stage_three_in_controller_only(
         }
 
     assert "sst_stage_three" in hidden_imports(None)
+    assert "sst_stage_four" in hidden_imports(None)
     assert "sst_stage_three" not in hidden_imports(tmp_path / "model")
+    assert "sst_stage_four" not in hidden_imports(tmp_path / "model")
+
+
+def test_packaged_builder_adds_macalc_model_application_and_pulp_runtime(
+    tmp_path: Path,
+) -> None:
+    from macalc_batch_entry import PROVENANCE_FILES
+    from tools import build_packaged_stages as builder
+
+    project = Path(__file__).resolve().parents[1]
+    model_dir = tmp_path / "MACalc Batch"
+    model_dir.mkdir()
+    python = tmp_path / "py311" / "python.exe"
+    entry = project / "src" / "macalc_batch_entry.py"
+    command = builder.pyinstaller_command(
+        python,
+        entry,
+        "MACalcModel",
+        tmp_path / "dist",
+        tmp_path / "work",
+        tmp_path / "spec",
+        project,
+        model=model_dir,
+    )
+
+    assert command[0] == str(python)
+    assert command[-1] == str(entry)
+    assert "MACalcModel" in command
+    assert str(model_dir) in command
+    assert str(model_dir / "LPIcurvestool") in {
+        command[index + 1]
+        for index, option in enumerate(command[:-1])
+        if option == "--paths"
+    }
+    assert any(
+        command[index] in ("--collect-all", "--collect-data")
+        and command[index + 1] == "pulp"
+        for index in range(len(command) - 1)
+    )
+    hidden_imports = {
+        command[index + 1]
+        for index, option in enumerate(command[:-1])
+        if option == "--hidden-import"
+    }
+    assert "sst_stage_four" not in hidden_imports
+    assert "sst_stage_three" not in hidden_imports
+    assert {Path(name).stem for name in PROVENANCE_FILES} <= hidden_imports
+    assert not any("pyBondsHMutils.py" in argument for argument in command)
+    # MACalc code must be bundled modules, not loose .py snapshots.
+    for index, option in enumerate(command[:-1]):
+        if option == "--add-data":
+            assert not any(name in command[index + 1] for name in PROVENANCE_FILES)
 
 
 @pytest.mark.excel
@@ -6945,7 +7152,7 @@ def test_main_stage_dispatch_keeps_default_one_and_treats_stage_two_cancellation
     assert all(reporter.joined for reporter in reporting_threads)
 
 
-@pytest.mark.parametrize("stage", ["0", "two"])
+@pytest.mark.parametrize("stage", ["0", "two", "5"])
 def test_main_rejects_invalid_stage_before_connecting_to_excel(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], stage: str,
 ) -> None:
@@ -6959,6 +7166,95 @@ def test_main_rejects_invalid_stage_before_connecting_to_excel(
     assert "--stage" in error and "invalid choice" in error
 
 
+def test_main_stage_four_dispatches_to_macalc_with_the_matched_caller(
+    monkeypatch: pytest.MonkeyPatch,
+    console_logger: logging.Logger,
+    reporting_threads: list[Any],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import bonds_lite_input as workflow
+
+    caller = SimpleNamespace(
+        fullname="Draft.xlsm", api=SimpleNamespace(FullName="Draft.xlsm")
+    )
+    app = SimpleNamespace(api=SimpleNamespace(Hwnd=1234), books=[caller])
+    monkeypatch.setitem(sys.modules, "xlwings", SimpleNamespace(apps=[app]))
+    output = Path("SST Output_Test/Credit/MACalc input_Test_unoptimised_assets.csv")
+    received: list[Any] = []
+
+    def run_stage_four(book: Any) -> Path:
+        assert book is caller
+        received.append(book)
+        return output
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sst_stage_four",
+        SimpleNamespace(run_stage_four=run_stage_four),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "bonds_lite_input",
+            "--caller",
+            "Draft.xlsm",
+            "--excel-hwnd",
+            "1234",
+            "--stage",
+            "4",
+        ],
+    )
+    monkeypatch.setattr(
+        "builtins.input", lambda *args: pytest.fail("No implicit pause")
+    )
+
+    assert workflow.main() == 0
+
+    assert received == [caller]
+    captured = capsys.readouterr()
+    console = captured.out + captured.err
+    assert "Stage 4 succeeded; MACalc results saved" in console
+    assert str(output) in console
+    assert all(reporter.joined for reporter in reporting_threads)
+
+
+def test_main_install_stage_four_cli_logs_the_created_backup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bonds_lite_input as workflow
+
+    backup = Path("Draft_backup.xlsm")
+    received: list[Path] = []
+    messages: list[str] = []
+
+    def install(caller: Path) -> Path:
+        received.append(caller)
+        return backup
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sst_stage_four",
+        SimpleNamespace(install_stage_four_controls=install),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["bonds_lite_input", "--install-stage-four", "Draft.xlsm"],
+    )
+    monkeypatch.setattr(
+        workflow.logger,
+        "info",
+        lambda message, *args: messages.append(str(message)),
+    )
+
+    assert workflow.main() == 0
+
+    assert received == [Path("Draft.xlsm")]
+    assert any("Stage 4 controls installed" in message for message in messages)
+    assert any(str(backup) in message for message in messages)
+
+
 def test_stage_two_launcher_preserves_stage_one_entry_and_visible_console() -> None:
     """Allow a shared launcher while pinning both public VBA entry points."""
     import bonds_lite_input as workflow
@@ -6969,6 +7265,25 @@ def test_stage_two_launcher_preserves_stage_one_entry_and_visible_console() -> N
     assert "--stage" in launcher and re.search(r"\b2\b", launcher)
     assert "--pause" in launcher and "-u -m bonds_lite_input" in launcher
     assert "shell.Run command, 1, False" in launcher
+
+
+def test_stage_four_launcher_adds_run_macalc_without_changing_earlier_stage_macros() -> (
+    None
+):
+    import bonds_lite_input as workflow
+
+    for launcher in (workflow.VBA_LAUNCHER, workflow.PACKAGED_VBA_LAUNCHER):
+        assert re.search(r"(?is)Public Sub RunMACalc\(\).*?LaunchBondsLite 4", launcher)
+        assert re.search(
+            r"(?is)Public Sub GenerateBondsLiteInput\(\).*?LaunchBondsLite 1",
+            launcher,
+        )
+        assert re.search(
+            r"(?is)Public Sub RunBondsLite\(\).*?LaunchBondsLite 2", launcher
+        )
+        assert re.search(
+            r"(?is)Public Sub PrepareMACalc\(\).*?LaunchBondsLite 3", launcher
+        )
 
 
 @pytest.fixture
