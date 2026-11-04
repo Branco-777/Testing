@@ -74,7 +74,7 @@ See Decisions 55-57 in `decisions.md` (agent-made, pending user approval).
 - *(Superseded by Revision 0.2: reusing a suffix now overwrites.)*
 - Existing Draft audits that point to `Bonds Lite output\...` stop being valid handoffs, so Stage 1 must be rerun once.
 - MACalc Batch skips filenames containing `_opt`, so a suffix containing `_opt` would hide the Stage 3 output from it. This is a Stage 4 concern; record it in the Stage 4 plan.
-- The packaged release (v8) does not include this change. A rebuild or promotion needs separate approval.
+- The packaged release (v8) does not include this change. A rebuild or promotion needs separate approval. (Resolved: released as `20261104-cache-v9`; see "Commit and release".)
 
 ## Addendum: Implementation Progress
 
@@ -140,3 +140,10 @@ User review outcome:
   - A `KeyboardInterrupt` during validation records an `Interrupted` audit, as a validation failure records `Failed`. An interrupt at the prompt itself writes nothing, like a cancel.
   - If another process creates `Credit` between the rename and the new `mkdir`, Stage 1 stops with "already exists; another run may be writing it" and logs the backup path if it cannot be renamed back.
   - The four new logging tests use an isolated recorder fixture rather than `caplog`, because earlier `main()` tests leave the module logger with `propagate=False` (the same cause as the known `rollback_failure` failure).
+
+### Commit and release (4 November 2026)
+
+- Committed as `84e2dae` (with the docs commit `2bd2f0e`) and pushed to `origin/main`.
+- Built `20261104-cache-v9` from `84e2dae` without `--promote`, using the `controller-py313` and `model-py311` build environments and the same model folder as v8. Both self-tests passed (`MODEL_SELF_TEST_OK`, `CONTROLLER_SELF_TEST_OK`). Compared with v8, both bundles have the same file names and frozen module sets (controller 82 files, model 869 files). The v9 controller's `bonds_lite_input` contains `find_stress_inconsistencies`, `confirm_stress_inconsistencies` and `allocate_stress_folder`.
+- The user approved the release; the central `current.txt` now points to `20261104-cache-v9`. Rollback is to `20261103-cache-v8`. The LocalAppData cache is expected to update when Excel next checks the pointer.
+- Still to do: the user's end-to-end Stage 1-3 rerun, which also replaces the legacy `Bonds Lite output` handoff.
