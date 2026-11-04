@@ -1,6 +1,6 @@
 # Plan: Stage 4 MACalc Batch On The Stage 3 Output
 
-Version 0.6 | 4 November 2026 | Step 13 packaging implementation verified; commit, build, promotion and packaged acceptance remain gated.
+Version 0.7 | 4 November 2026 | Step 13: committed (`b00910b`), release `20261104-cache-v10` built and promoted; packaged button acceptance pending.
 
 ## Overview
 
@@ -289,9 +289,23 @@ Write all tests before the code (testing-strategy skill). No Excel or real model
 - Full suite: **1,114 passed, 89 skipped, 2 known baseline failures** (the same
   two named above). Black passed for the new modules/builder and changed ranges
   of legacy files; `git diff --check` passed.
-- No commit, build, promotion, rollback or live workbook run was performed.
-  The active release remains `20261104-cache-v9`. Next gate: ask whether to
-  commit Stage 4 source, tests and docs without pushing.
+- With the user's approval ("You may commit, push and promote"), Stage 4
+  was committed and pushed as `b00910b`. The isolated `model-py311` build
+  environment was refreshed with the new pins (PuLP's internal version string
+  reports 3.0.2 for the installed 3.2.2 distribution), and CBC is available.
+- Release `20261104-cache-v10` was built from `b00910b` without `--promote`.
+  `MODEL_SELF_TEST_OK`, `CONTROLLER_SELF_TEST_OK` and `MACALC_SELF_TEST_OK`
+  passed. All six `macalc_source_sha256` values equal the accepted live-run
+  hashes; the three executable hashes match `release.json`; the Bonds model
+  sources equal v9's. The Controller (82 files) and Model (869 files) sets are
+  identical to v9; the new `MACalc\` app (934 files) includes CBC. The
+  controller archive contains `sst_stage_four` and accepts `--stage {1,2,3,4}`;
+  `_validate_packaged_bundle` accepts the published release.
+- v10 was then promoted (`current.txt` -> `20261104-cache-v10`). Rollback is
+  `20261104-cache-v9`.
+- **Remaining:** the packaged **Run MACalc** button run and its acceptance
+  checks (handoff "Packaged-run acceptance checks"). Step 13 is complete only
+  after the user accepts that run.
 
 ### Deferred gates
 

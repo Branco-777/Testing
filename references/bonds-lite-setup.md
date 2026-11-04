@@ -37,14 +37,15 @@ existing scenario inputs, templates and output paths as configured; those data
 paths are separate from the application cache. Do not copy application files
 between releases or delete LocalAppData cache folders while a run is active.
 
-**Deployment status:** release `20261103-cache-v8` (Stages 1-3) is active in
-the central pointer since 3 November 2026. It includes the 218-character
-Excel workbook path limit. The user's packaged Stage 1-3 test passed on v7;
-v8's LocalAppData cache updates when Excel next checks the pointer on a
-button click. To roll back, write `20261103-cache-v7` to the central
-`current.txt`. The backed-up Draft has the three Stage 1 path names
-installed. No path-control movement is required; moving a control is
-optional.
+**Deployment status:** release `20261104-cache-v10` (Stages 1-4, built from
+`b00910b`) is active in the central pointer since 4 November 2026. It adds
+`MACalc\MACalcModel.exe` and Stage 4 support to the controller; the Controller
+and Model file sets are unchanged from v9. The packaged Stage 4 button run is
+pending user acceptance. Each user's LocalAppData cache updates when Excel next
+checks the pointer on a button click; restart Excel if it is already open. To
+roll back, write `20261104-cache-v9` to the central `current.txt` (v9 rejects
+`--stage 4`). The backed-up Draft has the three Stage 1 path names installed.
+No path-control movement is required; moving a control is optional.
 
 ### Maintainers: Source Mode
 
@@ -397,17 +398,17 @@ With the Draft closed, run this from the project's `src` folder:
 python -m bonds_lite_input --install-stage-four "Draft Input spreadsheet for SST.xlsm"
 ```
 
-The installer backs up the Draft under `references\backups` before adding the Stage 4 panel, **Run MACalc** button and `RunMACalc` macro. It requires the Stage 3 panel and stops rather than overwriting occupied cells. The button requires a controller release that supports `--stage 4`; the current Stage 1-3 release does not yet include Stage 4. Once a Stage 4-capable release is approved, the button launches that controller with `--stage 4`.
+The installer backs up the Draft under `references\backups` before adding the Stage 4 panel, **Run MACalc** button and `RunMACalc` macro. It requires the Stage 3 panel and stops rather than overwriting occupied cells. The button requires a controller release that supports `--stage 4`; release `20261104-cache-v10` and later do.
 
 ### Run from source
 
-Until a Stage 4 controller release is approved, run from the project's `src` folder with the Draft open in desktop Excel:
+Maintainers can run Stage 4 from source, without the packaged release, from the project's `src` folder with the Draft open in desktop Excel:
 
 ```powershell
 python -u -m bonds_lite_input --caller "<Excel Workbook.FullName>" --caller-local "C:\path\to\Draft Input spreadsheet for SST.xlsm" --excel-hwnd <Excel-window-handle> --stage 4
 ```
 
-Use the Python 3.13 controller interpreter for `python`. Set `--caller` to the exact `Workbook.FullName` reported by Excel; for a OneDrive-synced Draft this can be a SharePoint URL. Set `--caller-local` to the Draft's local synced filesystem path. The window handle is the `Application.Hwnd` of the Excel instance containing the Draft. The installed button cannot run Stage 4 until a Stage 4-capable controller release is approved.
+Use the Python 3.13 controller interpreter for `python`. Set `--caller` to the exact `Workbook.FullName` reported by Excel; for a OneDrive-synced Draft this can be a SharePoint URL. Set `--caller-local` to the Draft's local synced filesystem path. The window handle is the `Application.Hwnd` of the Excel instance containing the Draft.
 
 ### Maintainers: package Stage 4
 
@@ -429,8 +430,8 @@ dispatching a packaged stage.
 
 Commit, build, promotion and the packaged button run are separate approval
 gates. Build under a new release ID without `--promote`, verify all three
-self-tests, and obtain approval before changing `current.txt`. The active
-release remains `20261104-cache-v9` until promotion is authorised. For the
+self-tests, and obtain approval before changing `current.txt`. Release
+`20261104-cache-v10` was built and promoted this way on 4 November 2026. For the
 packaged acceptance run, first rerun Stage 3 for a clean input and archive
 older MACalc inputs outside the stress folder; follow the checks in the
 [Stage 4 handoff](session-handoff-2026-11-04-stage-four.md).

@@ -1,6 +1,6 @@
 # Session Handoff: Stage 4 MACalc Batch
 
-Version 2.4 | Prepared 3 November 2026, updated 4 November 2026 | Step 13 code verified; next gate: commit approval, then build
+Version 2.5 | Prepared 3 November 2026, updated 4 November 2026 | v10 promoted; next: packaged Run MACalc acceptance
 
 > **Start here in the next session:** read "Next Session: Promote Stage 4"
 > below. Steps 1-12 are done and the user has accepted the live source run.
@@ -93,11 +93,13 @@ Version 2.4 | Prepared 3 November 2026, updated 4 November 2026 | Step 13 code v
 
 - Plan steps 1-12 in [plan-stage-four.md](plan-stage-four.md) are complete. The
   user accepted the step 12 live run (update item 9).
-- Nothing from Stage 4 is committed. Source, tests and docs are uncommitted
-  changes in the worktree (see "Uncommitted Stage 4 changes" below).
-- **Active central release:** `20261104-cache-v9`. **Rollback:**
-  `20261103-cache-v8`. v9 rejects `--stage 4`, so the **Run MACalc** button
-  in the Draft fails with a console error until a Stage 4 release is promoted.
+- **Update (4 November 2026, about 16:05 UTC):** with the user's approval,
+  Stage 4 was committed and pushed as `b00910b`. Release
+  `20261104-cache-v10` was built from it, passed all three self-tests and the
+  hash checks below, and was **promoted**. Approval gates 1-3 are done.
+  Only gate 4 (the packaged button run and its acceptance checks) remains.
+- **Active central release:** `20261104-cache-v10`. **Rollback:**
+  `20261104-cache-v9` (rejects `--stage 4`); roll back only with approval.
 - The Draft has the Stage 4 panel (`H112:O122`) and button (`btnRunMACalc`,
   anchored at `D112:G115`, macro `RunMACalc`). Its Stage 4 audit says
   `Succeeded`, from the source run.
@@ -590,9 +592,9 @@ python -m pytest -q -p no:cacheprovider
   PV sums to 20,516,188,301.57 in the CSV's unspecified units (Infrastructure:
   4,625,370,518.85; Bond: 13,135,651,535.34; PP: 2,755,166,247.38).
 - Step 12 is complete and **accepted by the user** (4 November 2026, about
-  15:43 UTC). The active packaged release remains `20261104-cache-v9`, which
-  does not accept `--stage 4`. Do not use the installed button until a
-  Stage 4-capable release is promoted.
-- **Next:** ask whether to commit the Stage 4 source/tests/docs without
-  pushing, then obtain build approval. Promotion and the packaged run need
-  separate explicit approval. Follow "Next Session: Promote Stage 4" above.
+  15:43 UTC). Release `20261104-cache-v10` (Stages 1-4, from `b00910b`) is
+  now active, so the installed button can run Stage 4.
+- **Next:** the packaged **Run MACalc** button run. Follow "Packaged-run
+  acceptance checks" above: rerun Stage 3 for a clean input, archive the
+  older `MACalc input_*` workbook outside the stress folder, click the
+  button, then compare the CSV with the accepted source run.
