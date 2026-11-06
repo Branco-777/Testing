@@ -954,6 +954,32 @@ def _restore_external_link_sources(
     return changed
 
 
+def _retained_template_links(
+    template_links: Sequence[str], current_links: Sequence[str]
+) -> tuple[str, ...]:
+    """Return the template links still in use after Stage 3 replaced the asset rows.
+
+    Excel drops a link once no cell refers to it, so links used only by the
+    replaced rows (for example an old model CSV) legitimately disappear. Excel
+    may also re-path the remaining links (SharePoint URL to UNC), so links are
+    matched in order by file name and the template's original paths returned.
+    Any added or reordered link keeps the full template set, so the save-time
+    checks still reject it (Decision 84).
+    """
+
+    def name(link: str) -> str:
+        return re.split(r"[\\/]", link)[-1].casefold()
+
+    remaining = iter(template_links)
+    retained = []
+    for current in current_links:
+        match = next((link for link in remaining if name(link) == name(current)), None)
+        if match is None:
+            return tuple(template_links)
+        retained.append(match)
+    return tuple(retained)
+
+
 def _grid(value: object) -> list[list[object]]:
     if not isinstance(value, (tuple, list)):
         return [[value]]
@@ -1833,11 +1859,21 @@ def write_macalc_output(
             )
             for aligned in isin_lists:
                 _write_isin_list(book, aligned)
+            expected_links = _retained_template_links(
+                template_links, _external_link_sources(book)
+            )
+            for dropped in (
+                link for link in template_links if link not in expected_links
+            ):
+                logger.info(
+                    "Template link used only by the replaced asset rows was removed: %s",
+                    dropped,
+                )
             book.save()
-            links_changed = _restore_external_link_sources(book, template_links)
+            links_changed = _restore_external_link_sources(book, expected_links)
             if links_changed:
                 book.save()
-            if _external_link_sources(book) != template_links:
+            if _external_link_sources(book) != expected_links:
                 raise StageThreeError(
                     "Saved MACalc workbook changed the template's external links"
                 )

@@ -3380,3 +3380,67 @@ def test_excel_slice_c_writes_resizes_and_verifies_lists_with_a_fan_out(
     with pytest.raises(stage_three.StageThreeError, match="lst_REITs"):
         stage_three.verify_macalc_output(output, asset_rows, **verify_arguments)
     assert hashlib.sha256(template.read_bytes()).digest() == template_hash
+
+
+TEMPLATE_LINKS = (
+    "https://example.sharepoint.com/Inputs/Curves.xlsm",
+    "https://example.sharepoint.com/MA/MACE.xlsb",
+    r"\\server\share\Output\py_bonds_Base_Scenario_nozeros.csv",
+    r"\\server\share\Regression\MACalcinPython_v4.0f.xlsb",
+)
+
+
+@pytest.mark.parametrize(
+    ("current", "expected"),
+    [
+        (TEMPLATE_LINKS, TEMPLATE_LINKS),
+        (TEMPLATE_LINKS[:2], TEMPLATE_LINKS[:2]),
+        ((TEMPLATE_LINKS[0], TEMPLATE_LINKS[2]), (TEMPLATE_LINKS[0], TEMPLATE_LINKS[2])),
+        ((), ()),
+        ((*TEMPLATE_LINKS, r"\\server\share\New.xlsb"), TEMPLATE_LINKS),
+        ((TEMPLATE_LINKS[1], TEMPLATE_LINKS[0]), TEMPLATE_LINKS),
+        (("https://example.sharepoint.com/Inputs/Other.xlsm",), TEMPLATE_LINKS),
+        (
+            (r"\\server\share\Inputs\Curves.xlsm", r"\\server\share\MA\MACE.xlsb"),
+            TEMPLATE_LINKS[:2],
+        ),
+    ],
+    ids=["unchanged", "replaced-rows-only-links-dropped", "middle-link-dropped",
+         "all-dropped", "added-link", "reordered", "unknown-file",
+         "excel-repathed-url-to-unc"],
+)
+def test_retained_template_links_allows_only_dropped_links(
+    current: tuple[str, ...], expected: tuple[str, ...]
+) -> None:
+    """Links used only by replaced asset rows may vanish; anything else is checked in full."""
+    from sst_stage_three import _retained_template_links
+
+    assert _retained_template_links(TEMPLATE_LINKS, current) == expected
+
+
+def test_restore_accepts_retained_links_after_template_link_dropped() -> None:
+    """Regression: a template link used only by replaced rows no longer fails the save."""
+    from sst_stage_three import (
+        StageThreeError,
+        _restore_external_link_sources,
+        _retained_template_links,
+    )
+
+    saved = [r"\\server\share\Inputs\Curves.xlsm", TEMPLATE_LINKS[1]]
+    changes: list[tuple[str, str]] = []
+
+    def change_link(current: str, original: str, kind: int) -> None:
+        changes.append((current, original))
+        saved[saved.index(current)] = original
+
+    book = SimpleNamespace(
+        api=SimpleNamespace(
+            LinkSources=lambda kind: tuple(saved), ChangeLink=change_link
+        )
+    )
+    with pytest.raises(StageThreeError, match="different number of external links"):
+        _restore_external_link_sources(book, TEMPLATE_LINKS)
+    expected = _retained_template_links(TEMPLATE_LINKS, saved)
+    assert _restore_external_link_sources(book, expected) is True
+    assert changes == [(r"\\server\share\Inputs\Curves.xlsm", TEMPLATE_LINKS[0])]
+    assert tuple(saved) == TEMPLATE_LINKS[:2]

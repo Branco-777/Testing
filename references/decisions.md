@@ -764,3 +764,17 @@ The packaged controller and a new packaged MACalc model app are built, and the r
 **Rationale:**
 - Every stage already saves the Draft when it writes its own audit, so the edits were saved anyway once the stage ran.
 - Saving first keeps the guarantee that downstream stages use the handoff from the saved Draft, without the manual Ctrl+S step.
+
+### Decision 84: Allow Stage 3 To Drop Template Links Used Only By Replaced Asset Rows (2026-11-06)
+**Question:** What should Stage 3 do when the MACalc template has external links that are used only by the asset rows Stage 3 replaces?
+**Decided by:** Agent (Supir Debug), 6 November 2026, after the user reported the failure; pending user approval of the release.
+**Choice:**
+- Before saving, Stage 3 records which template links are still in use, matching them in order by file name. These are the links Excel keeps after the asset rows below the ILS block are replaced.
+- Only these links are restored to the template's original paths and verified after saving.
+- Each dropped link is logged in the console.
+- An added or reordered link still fails with the existing messages.
+**Alternatives considered:**
+- Keep the strict count check and require templates with no links in the asset block. Rejected because the formulas in those rows are overwritten with values anyway, so the links cannot affect the output.
+- Remove the link check entirely. Rejected because it guards against Excel silently re-pathing the remaining links.
+**Rationale:**
+- The `202512 - JRL - MACalcinPython_v4.0f_100bpsSpread_updREIT.xlsb` template links rows 21+ of `I. Assets` to an old model CSV and to another MACalc workbook. Excel removes those links as soon as the rows are cleared, so the count check always failed.
