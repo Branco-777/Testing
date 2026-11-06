@@ -1938,12 +1938,34 @@ def initialise_stage_two_panel(caller: xw.Book) -> None:
         caller.app.api.EnableEvents = events
 
 
+def _save_pending_draft_edits(caller: xw.Book) -> None:
+    """Save unsaved Draft edits so Stages 2-4 read the handoff from disk (Decision 83)."""
+    if caller.api.Saved:
+        return
+    if getattr(caller.api, "ReadOnly", False):
+        raise BondsLiteError(
+            "Draft has unsaved changes but is open read-only; open an editable copy, "
+            "save it, then click the stage button again"
+        )
+    logger.info("Saving Draft's unsaved changes before running the stage")
+    events = caller.app.api.EnableEvents
+    try:
+        caller.app.api.EnableEvents = False
+        caller.save()
+    finally:
+        caller.app.api.EnableEvents = events
+    if not caller.api.Saved:
+        raise BondsLiteError(
+            "Draft has unsaved changes that could not be saved; save the Draft (Ctrl+S), "
+            "then click the stage button again"
+        )
+
+
 def resolve_stage_input(caller: xw.Book) -> Path:
     """Resolve the committed run folder, not an arbitrarily selected input file."""
     require_stage_panel(caller)
+    _save_pending_draft_edits(caller)
     fields = _read_stage_fields(caller)
-    if not caller.api.Saved:
-        raise BondsLiteError("Save Draft's successful Stage 1 audit before running Stage 2")
     value = fields["stage_two_input"]
     if fields["status"] != "Succeeded" or not value or value != fields["last_output"]:
         raise BondsLiteError("Stage 2 requires a successfully saved Stage 1 output")

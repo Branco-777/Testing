@@ -750,3 +750,17 @@ The packaged controller and a new packaged MACalc model app are built, and the r
 - Stage 1 is unchanged.
 **Alternatives considered:** Keep the MAP comparison (Decision 37). Rejected because Stage 1 removes negative cashflows from the MAP input and adjusts its PV to MACE, so a correct MAP input has no negative months and the check would always fail.
 **Rationale:** The Bonds input keeps the original negative cashflows, so it is the Stage 1 workbook that identifies the funded assets.
+
+### Decision 83: Auto-Save An Unsaved Draft Before Stages 2-4 (2026-11-06)
+**Question:** What should Stages 2-4 do when the Draft has unsaved edits, such as a changed MACalc template path?
+**Decided by:** User, 6 November 2026.
+**Choice:**
+- `resolve_stage_input` saves the Draft (with Excel events suppressed) before it reads the Stage 1 handoff, instead of failing with "Save Draft's successful Stage 1 audit before running Stage 2".
+- A read-only Draft, or a save that leaves the Draft unsaved, still stops the stage with an explicit message.
+- The handoff checks are unchanged: status Succeeded, matching handoff and last-output paths, and a complete run folder.
+**Alternatives considered:**
+- Keep the block and only reword the message. Rejected because the user preferred not to be interrupted by ordinary edits.
+- Drop the check without saving. Rejected because the handoff would then not match the Draft on disk.
+**Rationale:**
+- Every stage already saves the Draft when it writes its own audit, so the edits were saved anyway once the stage ran.
+- Saving first keeps the guarantee that downstream stages use the handoff from the saved Draft, without the manual Ctrl+S step.

@@ -878,7 +878,6 @@ def test_portable_output_path_rejects_unpublished_or_outside_files(
         "legacy_file",
         "temporary",
         "traversal_inside",
-        "unsaved",
         "missing_bonds",
         "missing_map",
         "empty_bonds",
@@ -921,9 +920,7 @@ def test_resolve_stage_input_gates_handoff_without_executing_stage_two(
         events.append("read")
         return fields.copy()
 
-    if scenario == "unsaved":
-        caller.api.Saved = False
-    elif scenario in ("Running", "Failed", "Interrupted"):
+    if scenario in ("Running", "Failed", "Interrupted"):
         fields["status"] = scenario
     elif scenario == "blank_status":
         fields["status"] = ""
@@ -1005,7 +1002,80 @@ def test_resolve_stage_input_gates_handoff_without_executing_stage_two(
             resolve(caller)
 
 
-def test_validate_bond_headers_accepts_raw_schema_and_destination_tail() -> None:
+def _unsaved_caller(tmp_path: Path, *, read_only: bool = False, save_sticks: bool = True) -> Any:
+    """Return a dirty Draft double whose save records the events state."""
+    caller = SimpleNamespace(
+        fullname=str(tmp_path / "Draft.xlsm"),
+        api=SimpleNamespace(Saved=False, ReadOnly=read_only),
+        app=SimpleNamespace(api=SimpleNamespace(EnableEvents=True)),
+        saves=[],
+    )
+
+    def save() -> None:
+        caller.saves.append(caller.app.api.EnableEvents)
+        caller.api.Saved = save_sticks
+
+    caller.save = save
+    return caller
+
+
+def _committed_handoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caller: Any) -> Path:
+    import bonds_lite_input as workflow
+
+    folder = tmp_path / "SST Output_b"
+    folder.mkdir()
+    output = _complete_run(folder / "Credit")
+    relative = "SST Output_b/Credit"
+    monkeypatch.setattr(workflow, "require_stage_panel", lambda book: None)
+
+    def read(book: Any) -> dict[str, object]:
+        assert book.api.Saved, "Handoff must be read only after the Draft is saved"
+        return {"status": "Succeeded", "stage_two_input": relative, "last_output": relative}
+
+    monkeypatch.setattr(workflow, "_read_stage_fields", read)
+    return output
+
+
+def test_resolve_stage_input_auto_saves_unsaved_draft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unrelated unsaved edit (e.g. a template path) is saved, not rejected."""
+    import bonds_lite_input as workflow
+
+    caller = _unsaved_caller(tmp_path)
+    output = _committed_handoff(tmp_path, monkeypatch, caller)
+    assert workflow.resolve_stage_input(caller) == output.resolve()
+    assert caller.saves == [False], "Draft saved once with events suppressed"
+    assert caller.app.api.EnableEvents is True and caller.api.Saved
+
+
+def test_resolve_stage_input_does_not_save_clean_draft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import bonds_lite_input as workflow
+
+    caller = _unsaved_caller(tmp_path)
+    caller.api.Saved = True
+    output = _committed_handoff(tmp_path, monkeypatch, caller)
+    assert workflow.resolve_stage_input(caller) == output.resolve()
+    assert caller.saves == []
+
+
+@pytest.mark.parametrize(
+    ("read_only", "message"),
+    [(True, "read-only"), (False, "could not be saved")],
+)
+def test_resolve_stage_input_rejects_draft_it_cannot_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_only: bool, message: str
+) -> None:
+    import bonds_lite_input as workflow
+
+    caller = _unsaved_caller(tmp_path, read_only=read_only, save_sticks=False)
+    _committed_handoff(tmp_path, monkeypatch, caller)
+    with pytest.raises(BondsLiteError, match=message):
+        workflow.resolve_stage_input(caller)
+    assert caller.saves == ([] if read_only else [False])
+    assert caller.app.api.EnableEvents is True
     """Accept only the raw prefix while retaining destination formula headers."""
     from bonds_lite_input import validate_bond_headers
 
