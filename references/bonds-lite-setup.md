@@ -37,11 +37,15 @@ existing scenario inputs, templates and output paths as configured; those data
 paths are separate from the application cache. Do not copy application files
 between releases or delete LocalAppData cache folders while a run is active.
 
-**Deployment status:** release `20261106-cache-v14` (Stages 1-4, built from
-`2f7326f`) is active in the central pointer since 6 November 2026. It makes
+**Deployment status:** release `20261106-cache-v15` (Stages 1-4, built from
+`e7f2d15`) is active in the central pointer since 6 November 2026. It lets
+Stage 3 accept MACalc templates whose asset rows hold the only links to a file
+(Decision 84). Packaged button acceptance of v15 is pending. Release
+`20261106-cache-v14` (built from
+`2f7326f`) made
 Stages 2-4 save the Draft automatically before starting, so an unsaved edit
 such as a changed MACalc template path no longer blocks a run (Decision 83).
-Packaged button acceptance of v14 is pending. Release `20261106-cache-v13`
+Release `20261106-cache-v13`
 (built from `eb098ea`) added the
 Stage 3 fix that reconciles MACE funded assets with the Stage 1 Bonds input
 instead of MAP (Decision 82); its Model and MACalc executables are identical to
@@ -55,7 +59,9 @@ packaged Stage 3 Draft-button run succeeded on 6 November against
 `MACalc input_Test_d58742fd77236ce3.xlsb`. Packaged Stage 2 and Stage 4
 acceptance remain pending. Each user's LocalAppData cache updates when Excel
 next checks the pointer on a button click; restart Excel if it is already open.
-To roll back, write `20261106-cache-v13` to the central `current.txt`. The
+To roll back, write `20261106-cache-v14` to the central `current.txt` as plain
+ASCII with no trailing newline (the Excel launcher rejects a pointer that ends
+in a line break). The
 backed-up Draft has the three Stage 1 path names installed. No path-control
 movement is required; moving a control is optional.
 
