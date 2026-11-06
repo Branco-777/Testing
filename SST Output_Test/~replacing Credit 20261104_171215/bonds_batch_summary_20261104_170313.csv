@@ -1,0 +1,3 @@
+input_file,status,seconds,output_folder_path,output_suffix,error
+Bonds Lite input_Bonds.xlsx,success,209.3778014999989,C:\Users\Joao Branco\OneDrive - Just Group\Financial Resilience Team - General\07 Workstream 2\Testing\SST Output_Test\Credit\JRL Bonds,run,
+Bonds Lite input_MAP.xlsx,success,214.2193103000027,C:\Users\Joao Branco\OneDrive - Just Group\Financial Resilience Team - General\07 Workstream 2\Testing\SST Output_Test\Credit\JRL MAP,run,
