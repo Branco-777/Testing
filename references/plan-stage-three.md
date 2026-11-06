@@ -2,6 +2,16 @@
 
 Version 0.15 | 3 November 2026 | Slices A-C committed in `0f6ef09` and released as `20261103-cache-v6`. **Slice D (unique MACalc input filename: run ID plus a fresh random token) implemented on 3 November with the user's answers to Q-D1 to Q-D4 (Decision 54 approved with changes); `20261103-cache-v7` promoted to the central pointer on 3 November at 18:18 UTC and the user's packaged Stage 1-3 test passed. The staged-path limit was lowered from 259 to 218 characters and included in `20261103-cache-v8`, built and verified without promotion, then promoted with the user's approval at 18:54 UTC. Slice D was committed as `0fdf81a`.** Stage 5 runs the consuming Python MACCalc (`MACalc_Batch`) on the validated MACalc input; Stage 3 does not touch it (Decision 51)
 
+## Current Release Status (6 November 2026)
+
+Stage 3 funded-set validation uses the negative-cashflow ISINs in the Stage 1
+Bonds input, not MAP (Decision 82). Release `20261106-cache-v13` is promoted.
+The packaged Draft-button Stage 3 run passed with the v13 local cache against
+`SST Output_Test/Credit`; the Draft audit is `Succeeded` and points to
+`SST Output_Test/Credit/MACalc input_Test_d58742fd77236ce3.xlsb`. The
+orchestrator verified the generated workbook before publishing it. Packaged
+Stage 2 and Stage 4 acceptance remain pending.
+
 ## Overview
 
 Stage 3 prepares a populated MACalc input workbook from the MACalc template, the Stage 1 Bonds Lite MAP input and the central MACE workbook. This plan covers Slice A only: validate the template's Mortgage/ILS blocks, identify funded assets from MACE's funding-leg cashflows, and write their funded-leg rows using the user-specified MAP and MACE column mappings. The cashflows come from MACE, not MAP. All Stage 3 logic lives in a new module, `src/sst_stage_three.py`. It reuses the existing Stage 1/2 handoff, audit and Excel-lifecycle helpers and does not add MACalc business logic to `src/bonds_lite_input.py`. Slice A was accepted by the user on 3 November 2026 (Decision 40). Later Stage 3 transfers will be planned as further slices; see "Planning The Next Slices" at the end of this plan.
@@ -312,7 +322,7 @@ See `references/decisions.md`: Decision 36 records the user's requirements; Deci
 6. **Anomalous MACE vectors and MAP/MACE set differences:** stop and report the issue; both empty means warn and continue (approved).
 7. **Output filename/format:** `MACalc input.xlsb` (approved). Changed by Slice D (Decision 54) to `MACalc input_<run ID>_<token>.xlsb`.
 
-## Remaining Operational Steps
+## Historical Operational Status (3 November 2026; superseded by Current Release Status)
 
 - Stage 2 succeeded for the current Stage 1 handoff `20261102_111001` on 3 November 2026. Its summary is `bonds_batch_summary_20261103_093358.csv`.
 - Stage 3 completed successfully for that handoff. The Draft audit records `Succeeded` and `SST_Stage3_LastSuccessfulOutput` points to `Bonds Lite output/20261102_111001/MACalc input.xlsb`. The user accepted the five funded rows on 3 November 2026.

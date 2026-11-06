@@ -46,11 +46,15 @@ Stage 2 with a 30-second quiet-period heartbeat, and retries deletion of
 OneDrive read-only `~replacing Credit ...` backups and failed Stage 1 folders.
 Release `20261104-cache-v11` was built from stale source (legacy `Bonds Lite
 output` folders, no Stages 3/4) and must never be promoted. Packaged Stage 2-4
-button runs on v13 are pending user acceptance. Each user's LocalAppData cache
-updates when Excel next checks the pointer on a button click; restart Excel if
-it is already open. To roll back, write `20261105-cache-v12` to the central
-`current.txt`. The backed-up Draft has the three Stage 1 path names installed.
-No path-control movement is required; moving a control is optional.
+button runs on v13 are pending user acceptance except Stage 3: its packaged
+Draft-button run succeeded on 6 November against `SST Output_Test/Credit`,
+using the v13 local cache. The audited output was
+`MACalc input_Test_d58742fd77236ce3.xlsb`. Packaged Stage 2 and Stage 4
+acceptance remain pending. Each user's LocalAppData cache updates when Excel
+next checks the pointer on a button click; restart Excel if it is already open.
+To roll back, write `20261105-cache-v12` to the central `current.txt`. The
+backed-up Draft has the three Stage 1 path names installed. No path-control
+movement is required; moving a control is optional.
 
 ### Maintainers: Source Mode
 

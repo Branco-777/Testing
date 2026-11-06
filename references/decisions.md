@@ -712,6 +712,34 @@ The packaged controller and a new packaged MACalc model app are built, and the r
 - Running MACalc from the shared OneDrive folder in packaged mode: rejected because the release design never runs code from the sync tree, and colleagues have no model Python.
 **Rationale:** Mirrors Stage 3, so the code, tests and user experience match, and keeps the packaged release self-contained.
 
+### Decision 78: Line-Buffer The Packaged Bonds Model Console (2026-11-04)
+**Question:** How should packaged Bonds Lite model progress be made visible while the batch is running?
+**Decided by:** User, 4 November 2026.
+**Choice:** Reconfigure `sys.stdout` and `sys.stderr` for line buffering at the start of the model entry point. Do not change the pinned Bonds Lite model sources or rely on `PYTHONUNBUFFERED`, which PyInstaller's frozen interpreter ignores.
+**Alternatives considered:** Modify the model's `print()` calls, or configure buffering through an environment variable. Rejected because the model sources are hash-pinned and the frozen interpreter ignores Python environment variables.
+**Rationale:** The packaged model entry point is ours to change and can flush each progress line without changing the model snapshot.
+
+### Decision 79: Show Model Heartbeats Only After Quiet Periods (2026-11-04)
+**Question:** How often should the controller show `Waiting:` while a model is producing progress?
+**Decided by:** User, 4 November 2026.
+**Choice:** During a model batch, suppress `Waiting:` while model output has arrived within the last 30 seconds; report a heartbeat after 30 seconds of silence. Outside a model batch, preserve the existing 5-second heartbeat.
+**Alternatives considered:** Keep the 5-second heartbeat regardless of model output. Rejected because it obscures the model's own live progress.
+**Rationale:** The user's request was to see model progress as it happens while retaining a useful signal if the model becomes quiet.
+
+### Decision 80: Line-Buffer The Packaged MACalc Console (2026-11-04)
+**Question:** Should the same packaged console fix apply to MACalc Batch?
+**Decided by:** User, 4 November 2026.
+**Choice:** Reconfigure `sys.stdout` and `sys.stderr` for line buffering at the start of the MACalc entry point, using a local helper rather than importing across entry points.
+**Alternatives considered:** Leave MACalc's packaged output buffered, or add a cross-entry import. Rejected to provide live MACalc progress without introducing an unnecessary PyInstaller dependency.
+**Rationale:** MACalc Batch has the same piped-stdout buffering behaviour as the Bonds Lite model.
+
+### Decision 81: Confirm The Live Model Output Changes (2026-11-04)
+**Question:** Do Decisions 78-80 reflect the requested implementation?
+**Decided by:** User, 4 November 2026.
+**Choice:** Confirm Decisions 78-80: line-buffer the two packaged model consoles and show Stage 2 waiting heartbeats only after 30 seconds without model output.
+**Alternatives considered:** None.
+**Rationale:** The user confirmed the implementation choices recorded in the approved version 0.2 live-output plan.
+
 ### Decision 82: Reconcile MACE Funded Assets With The Bonds Input, Not MAP (2026-11-06)
 **Question:** Which Stage 1 workbook should define the set of funded assets that Stage 3 compares with MACE?
 **Decided by:** User, 6 November 2026.
