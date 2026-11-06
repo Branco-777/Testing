@@ -75,8 +75,17 @@ def self_test(excel: bool = False) -> None:
     }), flush=True)
 
 
+def configure_console_streams() -> None:
+    """Line-buffer console streams when the runtime supports reconfiguration."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(line_buffering=True)
+
+
 def main(arguments: list[str] | None = None) -> int:
     """Run a bounded self-test or the folder batch without a Python CLI dependency."""
+    configure_console_streams()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("folder", type=Path, nargs="?")
     parser.add_argument("--self-test", action="store_true")

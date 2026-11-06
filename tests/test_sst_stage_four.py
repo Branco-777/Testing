@@ -696,6 +696,52 @@ def test_macalc_entry_frozen_self_test_imports_bundled_runtime_without_excel(
     assert not list(bundled.glob("*.py"))
 
 
+def test_macalc_entry_line_buffers_piped_stdout_before_exit() -> None:
+    """Expose a plain MACalc print while the packaged model is still running."""
+    import os
+    import queue
+    import subprocess
+    import threading
+
+    import macalc_batch_entry as entry
+
+    environment = os.environ.copy()
+    environment.pop("PYTHONUNBUFFERED", None)
+    source_folder = str(Path(entry.__file__).resolve().parent)
+    script = (
+        "import sys; "
+        f"sys.path.insert(0, {source_folder!r}); "
+        "from macalc_batch_entry import _configure_console_streams; "
+        "_configure_console_streams(); "
+        "print('MACALC_LINE_BUFFERED'); "
+        "sys.stdin.readline()"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=environment,
+    )
+    lines: queue.Queue[str] = queue.Queue()
+    reader = threading.Thread(
+        target=lambda: lines.put(child.stdout.readline()), daemon=True
+    )
+    reader.start()
+    try:
+        assert lines.get(timeout=5.0).strip() == "MACALC_LINE_BUFFERED"
+        assert child.poll() is None
+    finally:
+        if child.poll() is None:
+            child.stdin.write("continue\n")
+            child.stdin.flush()
+        child.wait(timeout=5.0)
+        reader.join(timeout=1.0)
+        child.stdin.close()
+        child.stdout.close()
+
+
 @pytest.mark.parametrize("model_fails", [False, True])
 def test_macalc_entry_frozen_main_runs_in_bundle_and_restores_cwd(
     fake_macalc_entry: tuple[Any, Path, Path, Path],

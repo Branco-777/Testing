@@ -35,6 +35,8 @@ if TYPE_CHECKING:
 # Fixed name: source mode runs this module as __main__, and Stage 3 logs to a child.
 logger = logging.getLogger("bonds_lite_input")
 
+MODEL_QUIET_HEARTBEAT_SECONDS = 30.0
+
 
 @dataclass
 class _ProgressState:
@@ -42,6 +44,7 @@ class _ProgressState:
 
     started: float
     stages: list[tuple[str, float]] = field(default_factory=list)
+    last_activity: float | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -642,6 +645,8 @@ def run_model_batch(
         raise BondsLiteError("Model timeout must be a positive finite duration")
     run_folder = run_folder.resolve()
     started = time.monotonic()
+    # Captured here because reader threads do not inherit context variables.
+    state = _progress_state.get()
     with _stage_batch_inputs_locally(run_folder, excel_application) as batch_folder:
         child = subprocess.Popen(
             _model_batch_command(config, batch_folder),
@@ -658,6 +663,9 @@ def run_model_batch(
             try:
                 for line in iter(child.stdout.readline, ""):
                     print(line, end="", flush=True)
+                    if state is not None:
+                        with state.lock:
+                            state.last_activity = time.perf_counter()
             except (OSError, ValueError) as error:
                 reader_errors.append(error)
 
@@ -681,14 +689,21 @@ def run_model_batch(
             _stop_model_child(child)
             raise
         finally:
-            if job is not None:
-                job.Close()
-            if reader is not None:
-                reader.join(timeout=5)
-                if reader.is_alive():
-                    raise BondsLiteError("Model output reader did not stop; recovery requires attention")
-            if child.stdout is not None:
-                child.stdout.close()
+            try:
+                if job is not None:
+                    job.Close()
+                if reader is not None:
+                    reader.join(timeout=5)
+                    if reader.is_alive():
+                        raise BondsLiteError(
+                            "Model output reader did not stop; recovery requires attention"
+                        )
+                if child.stdout is not None:
+                    child.stdout.close()
+            finally:
+                if state is not None:
+                    with state.lock:
+                        state.last_activity = None
 
         for summary in batch_folder.glob("bonds_batch_summary*.csv"):
             summary.rename(run_folder / summary.name)
@@ -717,17 +732,29 @@ def configure_console_logging() -> None:
 def _report_waiting(
     stop_event: threading.Event, state: _ProgressState, interval: float
 ) -> None:
-    """Report elapsed waiting time without accessing any Excel objects."""
+    """Report elapsed waiting time without accessing any Excel objects.
+
+    While the model is streaming output, report only after a quiet period.
+    """
+    last_waiting: float | None = None
     while not stop_event.wait(interval):
         with state.lock:
+            now = time.perf_counter()
+            if state.last_activity is not None:
+                quiet_since = max(
+                    state.last_activity,
+                    last_waiting if last_waiting is not None else state.last_activity,
+                )
+                if now - quiet_since < MODEL_QUIET_HEARTBEAT_SECONDS:
+                    continue
             stage, started = (
                 state.stages[-1] if state.stages else ("Processing", state.started)
             )
-            now = time.perf_counter()
             logger.info(
                 f"Waiting: {stage} | stage {now - started:.1f}s | "
                 f"total {now - state.started:.1f}s"
             )
+            last_waiting = now
 
 
 @contextmanager
@@ -1490,7 +1517,7 @@ def discard_replaced_stress_folder(backup: Path | None) -> None:
     if backup is None:
         return
     try:
-        shutil.rmtree(backup)
+        shutil.rmtree(backup, onexc=_retry_readonly_backup_removal)
     except OSError as error:
         logger.warning(
             f"Stage 1 succeeded, but the replaced output could not be deleted: "
@@ -1504,7 +1531,7 @@ def remove_incomplete_stress_folder(
     """Remove a failed attempt's stress folder, restore any replaced folder, and
     remove the root if this attempt created it and it is now empty."""
     try:
-        shutil.rmtree(folder)
+        shutil.rmtree(folder, onexc=_retry_readonly_backup_removal)
     except BaseException:
         if backup is not None:
             logger.error(

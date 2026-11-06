@@ -1338,6 +1338,7 @@ def test_report_waiting_uses_current_stage_clock_and_stops_without_sleeping(
     state = SimpleNamespace(
         started=100.0, lock=threading.Lock(),
         stages=[("Outer", 101.0), ("Inner", 104.0)] if active_stage else [],
+        last_activity=None,
     )
     clock = SimpleNamespace(now=109.0)
     monkeypatch.setattr(workflow.time, "perf_counter", lambda: clock.now)
@@ -3654,7 +3655,7 @@ def test_paired_cleanup_failure_preserves_generation_error_and_blocks_complete_p
         path.write_bytes(b"Completed Bonds member")
         return path
 
-    def denied_cleanup(path: Path) -> None:
+    def denied_cleanup(path: Path, *args: Any, **kwargs: Any) -> None:
         raise PermissionError("Cleanup denied sentinel")
 
     monkeypatch.setattr(workflow, "validate_inputs", lambda book: settings)
@@ -7725,6 +7726,212 @@ def test_preflight_model_environment_uses_bounded_separate_import_probe_not_mode
     assert len(probes) == 1
 
 
+def test_model_entry_line_buffers_piped_stdout_before_exit() -> None:
+    """Expose a plain Python print while the model process is still running."""
+    import os
+    import queue
+    import subprocess
+
+    import bonds_lite_model_entry as entry
+
+    environment = os.environ.copy()
+    environment.pop("PYTHONUNBUFFERED", None)
+    source_folder = str(Path(entry.__file__).resolve().parent)
+    script = (
+        "import sys; "
+        f"sys.path.insert(0, {source_folder!r}); "
+        "from bonds_lite_model_entry import configure_console_streams; "
+        "configure_console_streams(); "
+        "print('MODEL_LINE_BUFFERED'); "
+        "sys.stdin.readline()"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=environment,
+    )
+    lines: queue.Queue[str] = queue.Queue()
+    reader = threading.Thread(
+        target=lambda: lines.put(child.stdout.readline()), daemon=True
+    )
+    reader.start()
+    try:
+        assert lines.get(timeout=5.0).strip() == "MODEL_LINE_BUFFERED"
+        assert child.poll() is None
+    finally:
+        if child.poll() is None:
+            child.stdin.write("continue\n")
+            child.stdin.flush()
+        child.wait(timeout=5.0)
+        reader.join(timeout=1.0)
+        child.stdin.close()
+        child.stdout.close()
+
+
+@pytest.mark.parametrize("stream", [None, object()])
+def test_model_entry_console_configuration_tolerates_missing_streams(
+    monkeypatch: pytest.MonkeyPatch, stream: object,
+) -> None:
+    """Leave absent or non-reconfigurable frozen streams alone."""
+    import bonds_lite_model_entry as entry
+
+    monkeypatch.setattr(entry.sys, "stdout", stream)
+    monkeypatch.setattr(entry.sys, "stderr", stream)
+
+    entry.configure_console_streams()
+
+
+def test_model_entry_main_configures_streams_before_any_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Configure console streams before preflight emits any output."""
+    import bonds_lite_model_entry as entry
+
+    events: list[str] = []
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(
+        entry, "configure_console_streams", lambda: events.append("configure")
+    )
+    monkeypatch.setattr(entry, "preflight", lambda: events.append("preflight"))
+
+    assert entry.main(["--preflight"]) == 0
+    assert events == ["configure", "preflight"]
+
+
+def test_run_model_batch_records_model_activity_from_reader_thread(
+    stage_two_config_paths: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    console_logger: logging.Logger,
+) -> None:
+    """Capture streamed output activity and clear it when the batch returns."""
+    import io
+    import subprocess
+
+    import bonds_lite_input as workflow
+
+    paths = stage_two_config_paths
+    observed_activity: list[float | None] = []
+
+    class ChildOutput:
+        def __init__(self) -> None:
+            self.lines = iter(("MODEL_LINE_ONE\n", "MODEL_LINE_TWO\n", ""))
+            self.state: Any = None
+
+        def readline(self) -> str:
+            value = next(self.lines)
+            if value == "MODEL_LINE_TWO\n":
+                with self.state.lock:
+                    observed_activity.append(self.state.last_activity)
+            return value
+
+        def close(self) -> None:
+            pass
+
+    class Child:
+        pid = None
+        def __init__(self) -> None:
+            self.stdout = ChildOutput()
+            self.returncode = 0
+
+        def poll(self) -> int:
+            return self.returncode
+
+        def wait(self, timeout: float | None = None) -> int:
+            return self.returncode
+
+    child = Child()
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: child)
+    config = workflow.ModelConfig(
+        python_executable=paths.executable, model_dir=paths.model,
+    )
+
+    with workflow.run_progress() as state:
+        child.stdout.state = state
+        assert workflow.run_model_batch(paths.caller.parent, config) == 0
+        assert state.last_activity is None
+
+    assert len(observed_activity) == 1
+    assert observed_activity[0] is not None
+
+
+def test_report_waiting_suppressed_while_model_recently_active(
+    monkeypatch: pytest.MonkeyPatch,
+    console_logger: logging.Logger,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """During model output, report only after each 30-second quiet period."""
+    import bonds_lite_input as workflow
+
+    state = SimpleNamespace(
+        started=100.0,
+        lock=threading.Lock(),
+        stages=[("Run Bonds Lite batch", 100.0)],
+        last_activity=100.0,
+    )
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(workflow.time, "perf_counter", lambda: clock.now)
+
+    class StopEvent:
+        def __init__(self) -> None:
+            self.waits = 0
+
+        def wait(self, interval: float) -> bool:
+            assert interval == 5.0
+            self.waits += 1
+            clock.now += interval
+            return self.waits == 13
+
+    stop = StopEvent()
+    workflow._report_waiting(stop, state, 5.0)
+
+    messages = [
+        line for line in capsys.readouterr().out.splitlines()
+        if "waiting" in line.casefold()
+    ]
+    assert stop.waits == 13
+    assert len(messages) == 2
+    _assert_logged_durations(messages[0], 30.0)
+    _assert_logged_durations(messages[1], 60.0)
+
+
+def test_report_waiting_unchanged_without_model_activity(
+    monkeypatch: pytest.MonkeyPatch,
+    console_logger: logging.Logger,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Keep the ordinary heartbeat interval when no model line was seen."""
+    import bonds_lite_input as workflow
+
+    state = SimpleNamespace(
+        started=100.0, lock=threading.Lock(), stages=[], last_activity=None,
+    )
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(workflow.time, "perf_counter", lambda: clock.now)
+
+    class StopEvent:
+        def __init__(self) -> None:
+            self.waits = 0
+
+        def wait(self, interval: float) -> bool:
+            assert interval == 5.0
+            self.waits += 1
+            clock.now += interval
+            return self.waits == 4
+
+    stop = StopEvent()
+    workflow._report_waiting(stop, state, 5.0)
+
+    messages = [
+        line for line in capsys.readouterr().out.splitlines()
+        if "waiting" in line.casefold()
+    ]
+    assert stop.waits == 4
+    assert len(messages) == 3
+
+
 def test_packaged_model_command_uses_cached_executable_and_only_run_folder(
     tmp_path: Path,
 ) -> None:
@@ -8818,6 +9025,53 @@ def test_remove_incomplete_stress_folder_removes_only_created_folders(
     workflow.remove_incomplete_stress_folder(folder, created)
     assert not folder.exists()
     assert (folder.parent / "Stage 3 staging").is_dir()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows read-only deletion semantics")
+def test_discard_replaced_stress_folder_deletes_read_only_backup(
+    tmp_path: Path, module_records: list[logging.LogRecord],
+) -> None:
+    """Delete a OneDrive-style read-only replaced backup without a warning."""
+    import stat
+
+    import bonds_lite_input as workflow
+
+    _existing_credit(tmp_path)
+    folder, _, backup = workflow.allocate_stress_folder(tmp_path, "a", "Credit")
+    for path in [*backup.rglob("*"), backup]:
+        path.chmod(stat.S_IREAD)
+    try:
+        workflow.discard_replaced_stress_folder(backup)
+    finally:
+        if backup.exists():
+            for path in [backup, *backup.rglob("*")]:
+                path.chmod(stat.S_IWRITE | stat.S_IREAD)
+    assert not backup.exists()
+    assert folder.is_dir()
+    assert not [record for record in module_records if record.levelno >= logging.WARNING]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows read-only deletion semantics")
+def test_remove_incomplete_stress_folder_removes_read_only_partial_output(
+    tmp_path: Path,
+) -> None:
+    """Remove a failed attempt's read-only files and still restore the earlier folder."""
+    import stat
+
+    import bonds_lite_input as workflow
+
+    existing = _existing_credit(tmp_path)
+    before = _file_tree(existing.parent)
+    folder, created, backup = workflow.allocate_stress_folder(tmp_path, "a", "Credit")
+    partial = folder / "partial.xlsx"
+    partial.write_bytes(b"Incomplete")
+    partial.chmod(stat.S_IREAD)
+    try:
+        workflow.remove_incomplete_stress_folder(folder, created, backup)
+    finally:
+        if partial.exists():
+            partial.chmod(stat.S_IWRITE | stat.S_IREAD)
+    assert _file_tree(existing.parent) == before
 
 
 @pytest.mark.parametrize("suffix", ["a", "Q2 2026", "7"])

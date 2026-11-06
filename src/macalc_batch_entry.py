@@ -66,6 +66,14 @@ def _model_provenance(model_dir: Path) -> None:
         print(f"MACalc Batch SHA-256 {filename}: {digest}", flush=True)
 
 
+def _configure_console_streams() -> None:
+    """Line-buffer console streams when the runtime supports reconfiguration."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(line_buffering=True)
+
+
 def run(
     model_dir: Path,
     root: Path,
@@ -149,6 +157,7 @@ def run(
 
 def main(arguments: list[str] | None = None) -> int:
     """Run a packaged self-test or the guarded Stage 4 model batch."""
+    _configure_console_streams()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-dir", type=Path)
     parser.add_argument("--root", type=Path)

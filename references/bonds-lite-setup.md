@@ -37,14 +37,17 @@ existing scenario inputs, templates and output paths as configured; those data
 paths are separate from the application cache. Do not copy application files
 between releases or delete LocalAppData cache folders while a run is active.
 
-**Deployment status:** release `20261104-cache-v10` (Stages 1-4, built from
-`b00910b`) is active in the central pointer since 4 November 2026. It adds
-`MACalc\MACalcModel.exe` and Stage 4 support to the controller; the Controller
-and Model file sets are unchanged from v9. The packaged Stage 4 button run is
-pending user acceptance. Each user's LocalAppData cache updates when Excel next
+**Deployment status:** release `20261105-cache-v12` (Stages 1-4, built from
+`9ac5979` plus the live-output and read-only cleanup changes) is active in the
+central pointer since 5 November 2026. It keeps the v10 SST Output layout and
+Stage 3/4 support, adds line-buffered live model output in Stage 2 with a
+30-second quiet-period heartbeat, and retries deletion of OneDrive read-only
+`~replacing Credit ...` backups and failed Stage 1 folders. Release
+`20261104-cache-v11` was built from stale source (legacy `Bonds Lite output`
+folders, no Stages 3/4) and must never be promoted. The packaged Stage 2 run of
+v12 is pending user acceptance. Each user's LocalAppData cache updates when Excel next
 checks the pointer on a button click; restart Excel if it is already open. To
-roll back, write `20261104-cache-v9` to the central `current.txt` (v9 rejects
-`--stage 4`). The backed-up Draft has the three Stage 1 path names installed.
+roll back, write `20261104-cache-v10` to the central `current.txt`. The backed-up Draft has the three Stage 1 path names installed.
 No path-control movement is required; moving a control is optional.
 
 ### Maintainers: Source Mode
@@ -250,7 +253,7 @@ The button starts a visible console asynchronously, with unbuffered Python outpu
 
 - Start identifies the operation about to run, including each workbook open/close, data import, dependency refresh, worksheet calculation, save and verification.
 - Done shows the completed stage's duration and total elapsed processing time.
-- Waiting appears every five seconds during longer operations and shows the active stage and elapsed stage/total time. It means Python is waiting; it is not proof Excel is responsive or making progress.
+- Waiting appears every five seconds during longer controller-side operations and shows the active stage and elapsed stage/total time. During a Stage 2 model batch, model lines stream live and Waiting appears only after 30 seconds without model output. It means Python is waiting; it is not proof Excel is responsive or making progress.
 - Failed identifies the stage that raised an error. The final message explains the failure; it is not a successful export.
 - Total processing time excludes Python startup and the time spent waiting for Enter. It therefore is not an exact measurement from the physical button click.
 
@@ -317,7 +320,7 @@ After validation, with `SST_output_folder_suffix` set to `Q2 2026`, a run would 
 | Stage output must be an SST Output_<suffix>\<stress> folder | Rerun Stage 1 to create the paired output; legacy `Bonds Lite output\<timestamp>` and single-workbook audit links are not accepted |
 | Cannot replace the existing stress output folder | A file in `SST Output_<suffix>\Credit` is open (for example in Excel) or locked by OneDrive. Close it, let OneDrive finish syncing and rerun Stage 1. Nothing was written and the earlier output is untouched |
 | Stress output folder is not a real folder and cannot be replaced | `Credit` is a file or a link. Move it away and rerun Stage 1 |
-| The replaced output could not be deleted: ...\~replacing Credit ... | Stage 1 succeeded. Delete the named `~replacing` folder by hand when no files are open from it |
+| The replaced output could not be deleted: ...\~replacing Credit ... | Stage 1 succeeded. Read-only (OneDrive) attributes are cleared automatically, so this means a file is open or locked. Delete the named `~replacing` folder by hand when no files are open from it |
 | The earlier Credit output could not be restored ... it is kept at ... | Stage 1 failed and could not put the earlier output back. Remove any incomplete `Credit` folder, then rename the named `~replacing` folder back to `Credit` |
 | No Stage 2 base-scenario CSV ... rerun Stage 2 | Stage 1 has replaced the `Credit` folder since Stage 2 ran, so its results were removed. Rerun Stage 2, then Stage 3 |
 | No stress run is selected | Set `SST_Credit_DG_standalone` and/or `SST_Credit_spread_standalone` to TRUE |
