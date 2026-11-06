@@ -166,6 +166,7 @@ Function `read_map_bonds(path) -> MapBonds`.
 - Verify headers C, E, F, H, J and the month headers Q:ATT (1-1200). Read values in one bulk array, not cell by cell.
 - Require unique, non-blank ISINs. Keep C, E, F, H and J (cached value) per ISIN.
 - Compute `map_negative_isins` (min(Q:ATT) < 0) for the P17 reconciliation only. MAP cashflows are never written.
+  - **Superseded (Decision 82, 6 November 2026):** `read_map_bonds` now returns descriptions only. `read_bonds_negative_isins` reads the negative-month ISINs from `Bonds Lite input_Bonds.xlsx`, because Stage 1 removes negative cashflows from the MAP input.
 
 Pass criteria:
 - Synthetic tests cover each guard.
@@ -201,6 +202,8 @@ Function `reconcile_funded(map_bonds, funded) -> bool`, returning `True` only wh
 - If the funded set is empty (and so `map_negative_isins` is empty too), return `True` for the P4 warning; otherwise return `False`.
 
 Pass criteria: tests cover equal sets, MAP-only, MACE-only, a missing MAP ISIN, and both sets empty (warning, not error).
+
+**Change (Decision 82, 6 November 2026):** the signature is now `reconcile_funded(map_bonds, funded, bonds_negative_isins)`. The funded set must equal the negative-month ISINs of the Stage 1 Bonds input, not MAP. Mismatches are reported as "Bonds input only" or "MACE only". Every funded ISIN must still exist in MAP. Stage 3 stops if the Bonds input is missing from the run folder.
 
 [✓ Implemented — see Addendum: Implementation Progress]
 

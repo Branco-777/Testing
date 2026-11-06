@@ -58,14 +58,16 @@ def _map_row(
 
 
 def _map_bonds(*rows: dict[str, object]) -> dict[str, object]:
-    """Represent the MAP lookup and its negative-cashflow ISIN set."""
+    """Represent the MAP description lookup."""
+    return {"by_isin": {row["isin"]: row for row in rows}}
+
+
+def _bonds_negative(*rows: dict[str, object]) -> set[str]:
+    """Return the negative-cashflow ISINs of synthetic Stage 1 Bonds input rows."""
     return {
-        "by_isin": {row["isin"]: row for row in rows},
-        "map_negative_isins": {
-            row["isin"]
-            for row in rows
-            if min(row["cashflows"]) < 0  # type: ignore[arg-type]
-        },
+        str(row["isin"])
+        for row in rows
+        if min(row["cashflows"]) < 0  # type: ignore[arg-type]
     }
 
 
@@ -218,10 +220,13 @@ def test_excel_slice_b_real_data_regression_on_handoff_111001(
     snapshot = stage_three._read_template_snapshot(template)
     layout = snapshot.layout
     map_bonds = stage_three.read_map_bonds(run / shared.INPUT_FILENAMES["MAP"])
+    bonds_negative = stage_three.read_bonds_negative_isins(
+        run / shared.INPUT_FILENAMES["Bonds"]
+    )
     base = stage_three.read_map_base_output(stage_three.resolve_map_base_output(run))
     mace = stage_three.read_mace_inputs(mace_path)
     funded = stage_three.identify_funded(mace.funding)
-    stage_three.reconcile_funded(map_bonds, funded)
+    stage_three.reconcile_funded(map_bonds, funded, bonds_negative)
     stage_three.reconcile_slice_b(
         base, mace.bonds, mace.allocations, map_bonds, funded, datetime(2026, 6, 30)
     )
@@ -557,60 +562,91 @@ def test_identify_funded_rejects_blank_or_duplicate_mace_isins(
         stage_three.identify_funded(rows)
 
 
-def test_reconcile_funded_accepts_equal_map_and_mace_sets() -> None:
+def test_reconcile_funded_compares_mace_with_bonds_input_not_map() -> None:
+    """Stage 1 strips negatives from MAP, so MAP has none yet must still pass."""
     stage_three = _stage_three()
-    map_bonds = _map_bonds(
-        _map_row("XS0000000001", [-1.0] + [1.0] * (MONTH_COUNT - 1)),
+    negative = [-1.0] + [1.0] * (MONTH_COUNT - 1)
+    bonds_rows = [
+        _map_row("XS0000000001", negative),
         _map_row("XS0000000002"),
-    )
+    ]
+    map_bonds = _map_bonds(_map_row("XS0000000001"), _map_row("XS0000000002"))
     funded = [
         _mace_row("XS0000000001", [-1.0] + [0.0] * (MONTH_COUNT - 1))
     ]
 
-    stage_three.reconcile_funded(map_bonds, funded)
+    assert (
+        stage_three.reconcile_funded(
+            map_bonds, funded, _bonds_negative(*bonds_rows)
+        )
+        is False
+    )
 
 
 @pytest.mark.parametrize(
-    ("map_rows", "funded", "unexpected_isin"),
+    ("bonds_rows", "map_rows", "funded", "unexpected_isin", "label"),
     [
         (
             [_map_row("XS0000000001", [-1.0] + [1.0] * (MONTH_COUNT - 1)),
-             _map_row("MAP_ONLY", [-0.5] + [1.0] * (MONTH_COUNT - 1))],
+             _map_row("BONDS_ONLY", [-0.5] + [1.0] * (MONTH_COUNT - 1))],
+            [_map_row("XS0000000001"), _map_row("BONDS_ONLY")],
             [_mace_row("XS0000000001", [-1.0] + [0.0] * (MONTH_COUNT - 1))],
-            "MAP_ONLY",
+            "BONDS_ONLY",
+            "Bonds input only",
         ),
         (
-            [_map_row("XS0000000001", [-1.0] + [1.0] * (MONTH_COUNT - 1))],
+            [_map_row("XS0000000001", [-1.0] + [1.0] * (MONTH_COUNT - 1)),
+             _map_row("MACE_ONLY")],
+            [_map_row("XS0000000001"), _map_row("MACE_ONLY")],
             [
                 _mace_row("XS0000000001", [-1.0] + [0.0] * (MONTH_COUNT - 1)),
                 _mace_row("MACE_ONLY", [-0.5] + [0.0] * (MONTH_COUNT - 1)),
             ],
             "MACE_ONLY",
+            "MACE only",
         ),
         (
+            [_map_row("MISSING_FROM_MAP", [-1.0] + [1.0] * (MONTH_COUNT - 1))],
             [_map_row("XS0000000001")],
             [_mace_row("MISSING_FROM_MAP", [-1.0] + [0.0] * (MONTH_COUNT - 1))],
             "MISSING_FROM_MAP",
+            "missing from MAP",
         ),
     ],
 )
 def test_reconcile_funded_rejects_and_identifies_set_mismatches(
+    bonds_rows: list[dict[str, object]],
     map_rows: list[dict[str, object]],
     funded: list[dict[str, object]],
     unexpected_isin: str,
+    label: str,
 ) -> None:
     stage_three = _stage_three()
 
-    with pytest.raises(Exception) as error:
-        stage_three.reconcile_funded(_map_bonds(*map_rows), funded)
+    with pytest.raises(stage_three.StageThreeError) as error:
+        stage_three.reconcile_funded(
+            _map_bonds(*map_rows), funded, _bonds_negative(*bonds_rows)
+        )
 
+    assert "Bonds input/MACE funded set mismatch" in str(error.value)
     assert unexpected_isin in str(error.value)
+    assert label in str(error.value)
+
+
+def test_reconcile_funded_ignores_negative_cashflows_left_in_map() -> None:
+    """Only the Bonds input defines the funded set; MAP cashflows are not used."""
+    stage_three = _stage_three()
+    map_bonds = _map_bonds(
+        _map_row("XS0000000001", [-1.0] + [1.0] * (MONTH_COUNT - 1))
+    )
+
+    assert stage_three.reconcile_funded(map_bonds, [], set()) is True
 
 
 def test_reconcile_funded_allows_both_sets_empty_for_zero_funded_warning() -> None:
     stage_three = _stage_three()
 
-    stage_three.reconcile_funded(_map_bonds(), [])
+    stage_three.reconcile_funded(_map_bonds(), [], set())
 
 
 def test_build_funded_rows_maps_values_and_only_mace_funding_cashflows() -> None:
@@ -771,10 +807,11 @@ def test_map_and_mace_header_contracts_match_source_month_sequences() -> None:
 def test_reconcile_funded_returns_true_only_for_two_empty_sets() -> None:
     stage_three = _stage_three()
 
-    assert stage_three.reconcile_funded(_map_bonds(), []) is True
+    assert stage_three.reconcile_funded(_map_bonds(), [], set()) is True
     assert stage_three.reconcile_funded(
-        _map_bonds(_map_row("XS0000000001", [-1.0] + [1.0] * (MONTH_COUNT - 1))),
+        _map_bonds(_map_row("XS0000000001")),
         [_mace_row("XS0000000001", [-1.0] + [0.0] * (MONTH_COUNT - 1))],
+        {"XS0000000001"},
     ) is False
 
 
@@ -840,6 +877,7 @@ def _stage_three_resolver(
     run_folder.mkdir()
     map_path = run_folder / shared.INPUT_FILENAMES["MAP"]
     map_path.write_bytes(b"MAP")
+    (run_folder / shared.INPUT_FILENAMES["Bonds"]).write_bytes(b"Bonds")
     map_folder = run_folder / "JRL MAP"
     map_folder.mkdir()
     (map_folder / "py_bonds_Base_Scenario_nozeros_BWS.csv").write_text("x")
@@ -879,6 +917,7 @@ def test_resolve_stage_three_inputs_accepts_current_stage_two_and_relative_macal
 
     assert inputs.run_folder == run_folder
     assert inputs.map_path == run_folder / "Bonds Lite input_MAP.xlsx"
+    assert inputs.bonds_path == run_folder / "Bonds Lite input_Bonds.xlsx"
     assert inputs.template_path == tmp_path / "MACalc template.xlsb"
     assert inputs.mace_path == tmp_path / "MACE.xlsb"
     assert inputs.map_base_output_path == (
@@ -903,6 +942,22 @@ def test_resolve_stage_three_inputs_stops_when_base_scenario_csv_is_missing(
         stage_three.resolve_stage_three_inputs(caller)
 
 
+def test_resolve_stage_three_inputs_stops_when_bonds_input_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage_three = _stage_three()
+    draft = tmp_path / "Draft.xlsm"
+    draft.write_bytes(b"Draft")
+    run_folder = tmp_path / "SST Output_a" / "Credit"
+    run_folder.parent.mkdir()
+    caller = _stage_three_resolver(monkeypatch, stage_three, draft, run_folder)
+    (run_folder / "Bonds Lite input_Bonds.xlsx").unlink()
+
+    with pytest.raises(stage_three.StageThreeError, match="Bonds input is missing"):
+        stage_three.resolve_stage_three_inputs(caller)
+
+
 def test_resolve_stage_three_inputs_refuses_credit_replaced_by_stage_one(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -923,6 +978,7 @@ def test_resolve_stage_three_inputs_refuses_credit_replaced_by_stage_one(
     assert folder == run_folder
     (folder / "JRL MAP").mkdir()
     (folder / shared.INPUT_FILENAMES["MAP"]).write_bytes(b"New MAP")
+    (folder / shared.INPUT_FILENAMES["Bonds"]).write_bytes(b"New Bonds")
     shared.discard_replaced_stress_folder(backup)
 
     with pytest.raises(stage_three.StageThreeError) as error:
@@ -1123,6 +1179,7 @@ def _mock_stage_three_run(
         mace_path=tmp_path / "MACE.xlsb",
         map_base_output_path=run_folder / "JRL MAP" / "base.csv",
         valuation_date=datetime(2026, 6, 30),
+        bonds_path=run_folder / "Bonds Lite input_Bonds.xlsx",
     )
     monkeypatch.setattr(shared, "resolve_caller_path", lambda book: caller_path)
     monkeypatch.setattr(
@@ -1153,6 +1210,7 @@ def _mock_stage_three_run(
         ),
     )
     monkeypatch.setattr(stage_three, "read_map_bonds", lambda path: object())
+    monkeypatch.setattr(stage_three, "read_bonds_negative_isins", lambda path: set())
     monkeypatch.setattr(
         stage_three, "read_map_base_output", lambda path: SimpleNamespace(rows=())
     )
@@ -1164,7 +1222,7 @@ def _mock_stage_three_run(
         ),
     )
     monkeypatch.setattr(stage_three, "identify_funded", lambda table: [])
-    monkeypatch.setattr(stage_three, "reconcile_funded", lambda map_data, funded: True)
+    monkeypatch.setattr(stage_three, "reconcile_funded", lambda *args: True)
     monkeypatch.setattr(
         stage_three,
         "reconcile_slice_b",
@@ -1575,7 +1633,7 @@ class _MaceSheet:
         raise AssertionError(f"Unexpected MACE range: {address}")
 
 
-def test_read_map_bonds_uses_cached_descriptions_and_reconciliation_only_cashflows(
+def test_read_map_bonds_and_bonds_input_split_descriptions_from_funded_cashflows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1605,7 +1663,8 @@ def test_read_map_bonds_uses_cached_descriptions_and_reconciliation_only_cashflo
 
     result = stage_three.read_map_bonds(path)
 
-    assert result.map_negative_isins == {"XS0000000001"}
+    assert stage_three.read_bonds_negative_isins(path) == {"XS0000000001"}
+    assert not hasattr(result, "map_negative_isins")
     assert result.by_isin["XS0000000001"] == {
         "isin": "XS0000000001",
         "currency": "GBP",
@@ -2504,7 +2563,7 @@ def test_run_stage_three_writes_both_blocks_and_warns_on_csv_map_difference(
     )
     funded_rows, asset_rows = [["funded"]], [["asset1"], ["asset2"]]
     written: dict[str, object] = {}
-    monkeypatch.setattr(stage_three, "reconcile_funded", lambda map_data, funded: False)
+    monkeypatch.setattr(stage_three, "reconcile_funded", lambda *args: False)
     monkeypatch.setattr(
         stage_three, "build_funded_rows", lambda *args: funded_rows
     )

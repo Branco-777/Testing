@@ -13,7 +13,7 @@ import secrets
 import shutil
 import stat
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -128,7 +128,6 @@ class TemplateLayout:
 @dataclass(frozen=True)
 class MapBonds:
     by_isin: dict[str, dict[str, object]]
-    map_negative_isins: set[str]
 
 
 @dataclass(frozen=True)
@@ -191,6 +190,7 @@ class StageThreeInputs:
     mace_path: Path
     map_base_output_path: Path | None = None
     valuation_date: object = None
+    bonds_path: Path | None = None
 
 
 LIST_TITLE_ROW = 5
@@ -501,19 +501,26 @@ def identify_funded(table: MaceFundingTable | Sequence[object]) -> list[object]:
 
 
 def reconcile_funded(
-    map_bonds: MapBonds | Mapping[str, object], funded: Sequence[object]
+    map_bonds: MapBonds | Mapping[str, object],
+    funded: Sequence[object],
+    bonds_negative_isins: Iterable[str],
 ) -> bool:
-    """Require exact funded-set equality; return True when both sets are empty."""
-    map_negative = set(_get(map_bonds, "map_negative_isins"))
+    """Require Bonds-input/MACE funded-set equality; True when both sets are empty.
+
+    Stage 1 removes negative cashflows from the MAP input, so the funded set is
+    compared with the negative-cashflow ISINs of the Bonds input instead. MAP is
+    still required to hold every funded ISIN because it supplies descriptions.
+    """
+    bonds_negative = set(bonds_negative_isins)
     map_by_isin = _get(map_bonds, "by_isin")
     mace_funded = {str(_get(row, "isin")) for row in funded}
     missing = mace_funded - set(map_by_isin)
-    only_map = map_negative - mace_funded
-    only_mace = mace_funded - map_negative
-    if missing or only_map or only_mace:
+    only_bonds = bonds_negative - mace_funded
+    only_mace = mace_funded - bonds_negative
+    if missing or only_bonds or only_mace:
         details = []
-        if only_map:
-            details.append("MAP only: " + ", ".join(sorted(only_map)))
+        if only_bonds:
+            details.append("Bonds input only: " + ", ".join(sorted(only_bonds)))
         if only_mace:
             details.append("MACE only: " + ", ".join(sorted(only_mace)))
         if missing:
@@ -521,9 +528,9 @@ def reconcile_funded(
                 "funded ISINs missing from MAP: " + ", ".join(sorted(missing))
             )
         raise StageThreeError(
-            "MAP/MACE funded set mismatch (" + "; ".join(details) + ")"
+            "Bonds input/MACE funded set mismatch (" + "; ".join(details) + ")"
         )
-    return not map_negative and not mace_funded
+    return not bonds_negative and not mace_funded
 
 
 def _allocation_values(allocations: object, isin: object) -> list[object]:
@@ -1010,6 +1017,9 @@ def resolve_stage_three_inputs(caller: Any) -> StageThreeInputs:
     map_path = run_folder / shared.INPUT_FILENAMES["MAP"]
     if not map_path.is_file():
         raise StageThreeError(f"Stage 2 MAP input is missing: {map_path}")
+    bonds_path = run_folder / shared.INPUT_FILENAMES["Bonds"]
+    if not bonds_path.is_file():
+        raise StageThreeError(f"Stage 1 Bonds input is missing: {bonds_path}")
     template_path = _resolve_control_path(
         _named_value(caller, "SST_MACalc_Input_Template"),
         caller_path,
@@ -1022,7 +1032,9 @@ def resolve_stage_three_inputs(caller: Any) -> StageThreeInputs:
         "MACE",
         relative_ok=False,
     )
-    _check_path_distinct((map_path.resolve(), template_path, mace_path))
+    _check_path_distinct(
+        (map_path.resolve(), bonds_path.resolve(), template_path, mace_path)
+    )
     warning = caller.sheets["I. Control"].range("H44").options(err_to_str=True).value
     if isinstance(warning, str) and (
         "warning" in warning.casefold() or "mismatch" in warning.casefold()
@@ -1043,6 +1055,7 @@ def resolve_stage_three_inputs(caller: Any) -> StageThreeInputs:
         mace_path,
         map_base_output_path=resolve_map_base_output(run_folder),
         valuation_date=_named_value(caller, "I_Valuation_Date"),
+        bonds_path=bonds_path.resolve(),
     )
 
 
@@ -1203,7 +1216,7 @@ def _header_value(headers: Sequence[object], column: str) -> object:
     return headers[index] if index < len(headers) else None
 
 
-def _require_map_headers(headers: Sequence[object]) -> None:
+def _require_map_headers(headers: Sequence[object], label: str = "MAP") -> None:
     expected = {
         "C": "ISIN",
         "E": "Currency",
@@ -1225,11 +1238,15 @@ def _require_map_headers(headers: Sequence[object]) -> None:
     ):
         errors.append("Q:ATT must contain month ordinals 1 through 1200")
     if errors:
-        raise StageThreeError("MAP Bonds Data header mismatch: " + "; ".join(errors))
+        raise StageThreeError(
+            f"{label} Bonds Data header mismatch: " + "; ".join(errors)
+        )
 
 
-def read_map_bonds(path: Path) -> MapBonds:
-    """Read cached MAP descriptions and negative-month identifiers in one bulk read."""
+def _read_bonds_data_rows(
+    path: Path, label: str
+) -> list[tuple[int, list[object]]]:
+    """Bulk-read C:ATT of I_tbl_Monthly_Bonds from a Stage 1 Bonds Lite input."""
     path = Path(path).resolve(strict=True)
     with _excel_application() as application:
         with shared.owned_book(application, path, read_only=True) as book:
@@ -1238,33 +1255,69 @@ def read_map_bonds(path: Path) -> MapBonds:
                 table = sheet.api.ListObjects("I_tbl_Monthly_Bonds")
                 if int(table.HeaderRowRange.Row) != MAP_HEADER_ROW:
                     raise StageThreeError(
-                        "MAP table I_tbl_Monthly_Bonds must have headers on row 8"
+                        f"{label} table I_tbl_Monthly_Bonds must have headers on row 8"
                     )
             except StageThreeError:
                 raise
             except Exception as error:
                 raise StageThreeError(
-                    f"MAP workbook has no I_tbl_Monthly_Bonds table on {MAP_SHEET}"
+                    f"{label} workbook has no I_tbl_Monthly_Bonds table on {MAP_SHEET}"
                 ) from error
             headers = (
                 sheet.range(f"A{MAP_HEADER_ROW}:ATT{MAP_HEADER_ROW}")
                 .options(err_to_str=True)
                 .value
             )
-            _require_map_headers(headers)
+            _require_map_headers(headers, label)
             first_data = int(table.DataBodyRange.Row)
             last_data = first_data + int(table.DataBodyRange.Rows.Count) - 1
             if last_data < first_data:
-                raise StageThreeError("MAP Bonds Data table is empty")
+                raise StageThreeError(f"{label} Bonds Data table is empty")
             values = _grid(
                 sheet.range(f"C{first_data}:ATT{last_data}")
                 .options(ndim=2, err_to_str=True)
                 .value
             )
-    by_isin: dict[str, dict[str, object]] = {}
-    negative_isins: set[str] = set()
+    return list(enumerate(values, start=first_data))
+
+
+def _row_has_negative_cashflow(
+    values_row: Sequence[object], isin: str, label: str
+) -> bool:
     month_offset = _column_number("Q") - _column_number("C")
-    for row_number, values_row in enumerate(values, start=first_data):
+    cashflows = values_row[month_offset : month_offset + MONTH_COUNT]
+    if len(cashflows) != MONTH_COUNT:
+        raise StageThreeError(f"{label} cashflow vector for {isin} is incomplete")
+    numeric_cashflows = [
+        _numeric(value, f"{label} cashflow for {isin}, month {month}")
+        for month, value in enumerate(cashflows, start=1)
+    ]
+    return min(numeric_cashflows) < 0
+
+
+def read_bonds_negative_isins(path: Path) -> set[str]:
+    """Return ISINs with any negative monthly cashflow in the Stage 1 Bonds input.
+
+    These are the funded assets that MACE must agree with; Stage 1 removes the
+    negative cashflows before writing the MAP input.
+    """
+    label = "Bonds input"
+    negative_isins: set[str] = set()
+    for row_number, values_row in _read_bonds_data_rows(path, label):
+        isin = values_row[0] if values_row else None
+        if not isinstance(isin, str) or not isin.strip():
+            raise StageThreeError(
+                f"{label} ISIN is blank or invalid in row {row_number}"
+            )
+        if _row_has_negative_cashflow(values_row, isin, label):
+            negative_isins.add(isin)
+    return negative_isins
+
+
+def read_map_bonds(path: Path) -> MapBonds:
+    """Read cached MAP descriptions in one bulk read."""
+    by_isin: dict[str, dict[str, object]] = {}
+    for row_number, values_row in _read_bonds_data_rows(path, "MAP"):
         isin = values_row[0] if values_row else None
         if not isinstance(isin, str) or not isin.strip():
             raise StageThreeError(f"MAP ISIN is blank or invalid in row {row_number}")
@@ -1284,15 +1337,6 @@ def read_map_bonds(path: Path) -> MapBonds:
             )
         if index_linked is None:
             raise StageThreeError(f"MAP Index Linked? has no cached value for {isin}")
-        cashflows = values_row[month_offset : month_offset + MONTH_COUNT]
-        if len(cashflows) != MONTH_COUNT:
-            raise StageThreeError(f"MAP cashflow vector for {isin} is incomplete")
-        numeric_cashflows = [
-            _numeric(value, f"MAP cashflow for {isin}, month {month}")
-            for month, value in enumerate(cashflows, start=1)
-        ]
-        if min(numeric_cashflows) < 0:
-            negative_isins.add(isin)
         by_isin[isin] = {
             "isin": isin,
             "currency": currency,
@@ -1300,7 +1344,7 @@ def read_map_bonds(path: Path) -> MapBonds:
             "rating": rating,
             "index_linked": index_linked,
         }
-    return MapBonds(by_isin, negative_isins)
+    return MapBonds(by_isin)
 
 
 def _require_mace_headers(headers: Sequence[object]) -> None:
@@ -2217,11 +2261,12 @@ def run_stage_three(caller: Any) -> Path:
             inputs = resolve_stage_three_inputs(caller)
             template = _read_template_snapshot(inputs.template_path)
             map_bonds = read_map_bonds(inputs.map_path)
+            bonds_negative = read_bonds_negative_isins(inputs.bonds_path)
             base = read_map_base_output(inputs.map_base_output_path)
             logger.info("Base-scenario CSV: %s", inputs.map_base_output_path)
             mace = read_mace_inputs(inputs.mace_path)
             funded = identify_funded(mace.funding)
-            zero_funded = reconcile_funded(map_bonds, funded)
+            zero_funded = reconcile_funded(map_bonds, funded, bonds_negative)
             reconciliation = reconcile_slice_b(
                 base,
                 mace.bonds,

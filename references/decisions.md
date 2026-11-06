@@ -296,6 +296,7 @@ Requirements confirmed on 27 October 2026. Implementation decisions added on 28 
 - Both empty is the zero-funded warning case, not an error.
 **Alternatives considered:** Ignore anomalous rows (could silently drop or misclassify a funding leg); trust MACE alone (would not detect MACE and Stage 1 data from different dates or portfolios).
 **Rationale:** Both checks pass on current data and protect the main data-transfer risk the user raised. The user approved both checks on 2 November 2026.
+**Superseded in part by:** Decision 82. The funded-set reconciliation now uses the Stage 1 Bonds input, not MAP.
 
 ### Decision 38: Preserve Excel State And External Links In MACalc Output (2026-11-02)
 **Question:** How should the Stage 3 writer handle Excel application startup and workbook links when saving a staged MACalc copy?
@@ -710,3 +711,14 @@ The packaged controller and a new packaged MACalc model app are built, and the r
 - `LastSuccessfulOutput` = the workbook: rejected because it already equals `InputRun` (in place, Decision 61); the CSV is the new artefact.
 - Running MACalc from the shared OneDrive folder in packaged mode: rejected because the release design never runs code from the sync tree, and colleagues have no model Python.
 **Rationale:** Mirrors Stage 3, so the code, tests and user experience match, and keeps the packaged release self-contained.
+
+### Decision 82: Reconcile MACE Funded Assets With The Bonds Input, Not MAP (2026-11-06)
+**Question:** Which Stage 1 workbook should define the set of funded assets that Stage 3 compares with MACE?
+**Decided by:** User, 6 November 2026.
+**Choice:**
+- Stage 3 compares the MACE-funded set with the ISINs that have any negative month in `Bonds Lite input_Bonds.xlsx` (`I_tbl_Monthly_Bonds`, Q:ATT).
+- MAP still supplies the funded rows' descriptions, and every funded ISIN must exist in MAP.
+- Stage 3 stops if `Bonds Lite input_Bonds.xlsx` is missing from the run folder.
+- Stage 1 is unchanged.
+**Alternatives considered:** Keep the MAP comparison (Decision 37). Rejected because Stage 1 removes negative cashflows from the MAP input and adjusts its PV to MACE, so a correct MAP input has no negative months and the check would always fail.
+**Rationale:** The Bonds input keeps the original negative cashflows, so it is the Stage 1 workbook that identifies the funded assets.
