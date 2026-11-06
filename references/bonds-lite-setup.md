@@ -37,22 +37,25 @@ existing scenario inputs, templates and output paths as configured; those data
 paths are separate from the application cache. Do not copy application files
 between releases or delete LocalAppData cache folders while a run is active.
 
-**Deployment status:** release `20261106-cache-v13` (Stages 1-4, built from
-`eb098ea`) is active in the central pointer since 6 November 2026. It adds the
+**Deployment status:** release `20261106-cache-v14` (Stages 1-4, built from
+`2f7326f`) is active in the central pointer since 6 November 2026. It makes
+Stages 2-4 save the Draft automatically before starting, so an unsaved edit
+such as a changed MACalc template path no longer blocks a run (Decision 83).
+Packaged button acceptance of v14 is pending. Release `20261106-cache-v13`
+(built from `eb098ea`) added the
 Stage 3 fix that reconciles MACE funded assets with the Stage 1 Bonds input
 instead of MAP (Decision 82); its Model and MACalc executables are identical to
 v12. Release `20261105-cache-v12` added line-buffered live model output in
 Stage 2 with a 30-second quiet-period heartbeat, and retries deletion of
 OneDrive read-only `~replacing Credit ...` backups and failed Stage 1 folders.
 Release `20261104-cache-v11` was built from stale source (legacy `Bonds Lite
-output` folders, no Stages 3/4) and must never be promoted. Packaged Stage 2-4
-button runs on v13 are pending user acceptance except Stage 3: its packaged
-Draft-button run succeeded on 6 November against `SST Output_Test/Credit`,
-using the v13 local cache. The audited output was
+output` folders, no Stages 3/4) and must never be promoted. On v13, the
+packaged Stage 3 Draft-button run succeeded on 6 November against
+`SST Output_Test/Credit`. The audited output was
 `MACalc input_Test_d58742fd77236ce3.xlsb`. Packaged Stage 2 and Stage 4
 acceptance remain pending. Each user's LocalAppData cache updates when Excel
 next checks the pointer on a button click; restart Excel if it is already open.
-To roll back, write `20261105-cache-v12` to the central `current.txt`. The
+To roll back, write `20261106-cache-v13` to the central `current.txt`. The
 backed-up Draft has the three Stage 1 path names installed. No path-control
 movement is required; moving a control is optional.
 

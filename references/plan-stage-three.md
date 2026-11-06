@@ -5,8 +5,9 @@ Version 0.15 | 3 November 2026 | Slices A-C committed in `0f6ef09` and released 
 ## Current Release Status (6 November 2026)
 
 Stage 3 funded-set validation uses the negative-cashflow ISINs in the Stage 1
-Bonds input, not MAP (Decision 82). Release `20261106-cache-v13` is promoted.
-The packaged Draft-button Stage 3 run passed with the v13 local cache against
+Bonds input, not MAP (Decision 82). Release `20261106-cache-v14` is promoted;
+it adds auto-saving of an unsaved Draft before Stages 2-4 (Decision 83).
+On v13, the packaged Draft-button Stage 3 run passed with the local cache against
 `SST Output_Test/Credit`; the Draft audit is `Succeeded` and points to
 `SST Output_Test/Credit/MACalc input_Test_d58742fd77236ce3.xlsb`. The
 orchestrator verified the generated workbook before publishing it. Packaged
