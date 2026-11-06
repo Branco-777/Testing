@@ -31,6 +31,11 @@ launches the cached controller/model locally. Later clicks in that Excel
 session do not contact the release share. No Python installation or
 environment-variable setup is required.
 
+The packaged Draft launcher strips Windows CR/LF line endings from both the
+central and LocalAppData `current.txt` pointers before validating their release
+IDs. If the central pointer or release is unavailable or incomplete, it can use
+the last complete local cache.
+
 The central share is a package source only; the workbook never launches an
 executable from UNC or from inside the OneDrive sync tree. Keep the Draft's
 existing scenario inputs, templates and output paths as configured; those data
@@ -129,13 +134,15 @@ The supplied source was rescanned as B8:ATT1066, or 1,058 bond rows; the supplie
 6. Follow the stages in the visible console. If the credit flags and I. Credit Stresses are inconsistent, Stage 1 first lists every inconsistency and asks `Proceed with these inconsistencies? [y/N]`. Answer `y` or `yes` to continue with the stresses exactly as shown. Any other answer, or a blank, cancels the run: no folder is created or replaced and the Stage 1 audit is left as it was, so fix the flags or the stresses and rerun. Wait for the saved-path or failure summary and total processing time. Audit persistence, cleanup and guard release finish before the console asks you to press Enter to close it. A second simultaneous run for the same Draft is rejected without changing the active run's audit. A failure message is not a successful output.
 7. After Stage 1 succeeds and its saved handoff is current, click **Run Bonds Lite**. Stage 2 passes that run folder to the batch script once. Close both generated inputs in Excel first. If old results exist, answer `y` to the console overwrite question; blank or any other answer defaults to No. Stage 2 allows up to 60 minutes for the complete batch.
 
+**Pending next controller release (Decision 86; not in live v15 yet):** the console opens with `Starting Stage <N>...`, followed by a stage-labelled timing line. Failure and interruption summaries also identify the stage. Stage 4 hides the raw `MACalc child command:` line from normal console output; it is available only at DEBUG level. The readable MACalc options, progress and errors remain visible.
+
 The workflow generates two workbooks using all credit blocks, regardless of scenario toggles. Date, entity and stresses are captured once, so both outputs use the same settings even if controls are subsequently edited. Stage 2 executes the Bonds Lite model only after a saved Stage 1 handoff is validated. Entity must be nonempty Windows-safe text with no surrounding whitespace because it is used unchanged in directory names.
 
 ## Stage 3 Audit And MACalc Input
 
 Click **Prepare MACalc** on I. Control (around row 100). It runs only when Stage 2 has succeeded on the current Stage 1 handoff. It then writes `MACalc input_<suffix>_<token>.xlsb` into that same `SST Output_<suffix>\Credit` folder, where `<suffix>` is taken from the parent `SST Output_<suffix>` folder name; for example `MACalc input_Q2 2026_3f9c2a7be104d65e.xlsb`. The 16-character token is new on every run, so each name is unique across synced folders. Earlier outputs in the folder are kept, and a rerun simply adds a new file (a Stage 1 rerun with the same suffix replaces the whole `Credit` folder, including these files). **Last Successful Output** always names the newest one; Stage 4 reads its input from there and never guesses the name.
 
-While it runs, Stage 3 builds the workbook in `SST Output_<suffix>\Stage 3 staging\` (outside `Credit`) and removes that folder when it finishes. The run stops before writing anything if the run folder is not inside an `SST Output_<suffix>` folder, or if the output path is longer than 218 characters, the longest path Excel can open (shorten the output folder path).
+While it runs, Stage 3 builds the workbook in `SST Output_<suffix>\Stage 3 staging\` (outside `Credit`) and removes its staging folder when it finishes. An interruption or a OneDrive cleanup failure can leave staging files behind; remove them only when no Stage 3 run is active. The run stops before writing anything if the run folder is not inside an `SST Output_<suffix>` folder, or if the output path is longer than 218 characters, the longest path Excel can open (shorten the output folder path).
 
 The blue panel `SST_Stage3_Panel` beside the button records the following:
 - Last Run, Start, Finish, Time and User;
@@ -355,6 +362,7 @@ After validation, with `SST_output_folder_suffix` set to `Q2 2026`, a run would 
 | P. Base Curves[GBP SONIA] is nonnumeric after calculation | Open Draft in the normal Excel session with the JRC add-in loaded, then run Stage 1 using the installed button; do not generate inputs from a separate hidden Excel instance |
 | Stage 2 reports nonnumeric GBP SONIA cached values | Do not retry Stage 2 on that handoff. Run Stage 1 from the installed button in Draft's add-in-enabled Excel session, then verify the new audit and input pair |
 | Use a local synchronised path, not a workbook URL | Open Draft from the locally synchronised OneDrive folder |
+| Unable to read a complete central release and no complete local cache exists | The packaged launcher now accepts CR/LF-terminated central and local `current.txt` files. If this persists, check that the central pointer names a complete release and the LocalAppData pointer names a complete cached release |
 | A Bonds Lite run is already in progress | Let the first run finish; do not keep clicking |
 | Install the Stage 1 audit panel with Draft closed before running | Close Draft and run the installer; the Python button entry point now requires the installed panel and names |
 | Draft is read-only / I. Control is protected | Resolve workbook access/protection through the authorised owner; no stage is started without a writable audit |
@@ -457,7 +465,9 @@ older MACalc inputs outside the stress folder; follow the checks in the
 
 ### Input, backup and outputs
 
-MACalc Batch runs in place on the audited workbook in `SST Output_<suffix>\Credit`. It does not create a separate Stage 4 input copy. Before each run, Stage 4 replaces the one backup at `SST Output_<suffix>\Stage 4 backup\<workbook name>`. It does not accumulate timestamped backups. If you rerun Stage 4 without rerunning Stage 3 first, the backup contains the prior Stage 4 result; rerun Stage 3 when you need a clean input.
+MACalc Batch runs in place on the audited workbook in `SST Output_<suffix>\Credit`. It does not create a separate Stage 4 input copy. Live v15 keeps one pre-run backup for each workbook at `SST Output_<suffix>\Stage 4 backup\<workbook name>`.
+
+The pending next controller release (Decision 85) verifies the new backup, then removes older matching MACalc backups so the folder retains only that latest pre-run input. Stage 4 runs targeting the same output folder are serialised within the Windows session. If MACalc fails, its pre-run backup is retained; "latest" means the most recent attempt, not the most recent successful run. If you rerun Stage 4 without rerunning Stage 3 first, the backup contains the prior Stage 4 result; rerun Stage 3 when you need a clean input.
 
 The expected result is `<workbook stem>_unoptimised_assets.csv` beside the workbook. MACalc runs with binary optimisation OFF, the optimisation pass OFF and the cost-of-default floor ON. The Draft's `SST_Credit_DG_standalone` value is passed as the downgrade flag; that option is currently inactive while optimisation is OFF. A successful process and a non-empty CSV confirm execution, not the reasonableness of the figures. Review the results before sign-off.
 

@@ -232,7 +232,7 @@ def preflight_macalc_environment(config: MacalcConfig) -> None:
 
 
 def backup_stage_four_input(workbook: Path) -> Path:
-    """Atomically replace the single pre-run backup outside the stress folder."""
+    """Keep only the latest verified Stage 4 backup outside the stress folder."""
     workbook = Path(workbook).resolve(strict=True)
     output_root = workbook.parent.parent
     backup_folder = output_root / STAGE_FOUR_BACKUP_FOLDER
@@ -252,6 +252,26 @@ def backup_stage_four_input(workbook: Path) -> Path:
         if shared._file_hash(temporary) != shared._file_hash(workbook):
             raise StageFourError(f"Stage 4 backup verification failed: {temporary}")
         os.replace(temporary, destination)
+        for previous in backup_folder.iterdir():
+            if (
+                previous == destination
+                or not previous.is_file()
+                or not MACALC_NAME_PATTERN.fullmatch(previous.name)
+            ):
+                continue
+            try:
+                previous.unlink()
+            except OSError as error:
+                try:
+                    shared._retry_readonly_backup_removal(
+                        os.unlink, str(previous), error
+                    )
+                except OSError as cleanup_error:
+                    raise StageFourError(
+                        f"Could not remove previous Stage 4 backup: "
+                        f"{previous}: {cleanup_error}"
+                    ) from cleanup_error
+            logger.info("Removed previous Stage 4 backup: %s", previous)
     except Exception as error:
         if temporary is not None:
             try:
@@ -297,7 +317,7 @@ def run_macalc_batch(config: MacalcConfig, inputs: StageFourInput) -> Path:
         "downgrade %s (inactive while optimisation is OFF); CoD floor at zero",
         "ON" if inputs.is_downgrade_run else "OFF",
     )
-    logger.info("MACalc child command: %s", subprocess.list2cmdline(command))
+    logger.debug("MACalc child command: %s", subprocess.list2cmdline(command))
     child = subprocess.Popen(
         command,
         cwd=str(config.model_dir),
@@ -448,62 +468,76 @@ def run_stage_four(caller: Any) -> Path:
     with shared.workbook_run_guard(caller_path):
         require_stage_four_panel(caller)
         inputs = resolve_stage_four_input(caller)
-        previous = _read_stage_four_fields(caller)["last_output"]
-        input_path = _portable_file_path(caller_path, inputs.workbook)
-        started = datetime.now()
-        clock = time.perf_counter()
+        backup_folder = inputs.workbook.parent.parent / STAGE_FOUR_BACKUP_FOLDER
+        with shared.workbook_run_guard(
+            backup_folder,
+            conflict_message=(
+                "A Stage 4 run is already in progress for this output folder"
+            ),
+        ):
+            return _run_stage_four_with_output_guard(caller, caller_path, inputs)
+
+
+def _run_stage_four_with_output_guard(
+    caller: Any, caller_path: Path, inputs: StageFourInput
+) -> Path:
+    """Run Stage 4 while serialising access to the shared output backup."""
+    previous = _read_stage_four_fields(caller)["last_output"]
+    input_path = _portable_file_path(caller_path, inputs.workbook)
+    started = datetime.now()
+    clock = time.perf_counter()
+    write_stage_four_audit(
+        caller,
+        {
+            "last_run": started.replace(hour=0, minute=0, second=0, microsecond=0),
+            "start": started,
+            "finish": None,
+            "elapsed": None,
+            "user": getpass.getuser(),
+            "status": "Running",
+            "input_run": input_path,
+            "last_output": previous,
+        },
+    )
+    try:
+        config = load_macalc_config(caller_path)
+        preflight_macalc_environment(config)
+        backup = backup_stage_four_input(inputs.workbook)
+        logger.info("Stage 4 input: %s", inputs.workbook)
+        logger.info("Stage 4 backup: %s", backup)
+        output = run_macalc_batch(config, inputs)
+        portable_output = _portable_file_path(caller_path, output)
         write_stage_four_audit(
             caller,
             {
-                "last_run": started.replace(hour=0, minute=0, second=0, microsecond=0),
-                "start": started,
-                "finish": None,
-                "elapsed": None,
-                "user": getpass.getuser(),
-                "status": "Running",
-                "input_run": input_path,
-                "last_output": previous,
+                "finish": datetime.now(),
+                "elapsed": (time.perf_counter() - clock) / 86400,
+                "status": "Succeeded",
+                "last_output": portable_output,
             },
         )
+        logger.info("Stage 4 results: %s", output)
+        return output
+    except BaseException as error:
         try:
-            config = load_macalc_config(caller_path)
-            preflight_macalc_environment(config)
-            backup = backup_stage_four_input(inputs.workbook)
-            logger.info("Stage 4 input: %s", inputs.workbook)
-            logger.info("Stage 4 backup: %s", backup)
-            output = run_macalc_batch(config, inputs)
-            portable_output = _portable_file_path(caller_path, output)
             write_stage_four_audit(
                 caller,
                 {
                     "finish": datetime.now(),
                     "elapsed": (time.perf_counter() - clock) / 86400,
-                    "status": "Succeeded",
-                    "last_output": portable_output,
+                    "status": (
+                        "Interrupted"
+                        if isinstance(error, KeyboardInterrupt)
+                        else "Failed"
+                    ),
+                    "last_output": previous,
                 },
             )
-            logger.info("Stage 4 results: %s", output)
-            return output
-        except BaseException as error:
-            try:
-                write_stage_four_audit(
-                    caller,
-                    {
-                        "finish": datetime.now(),
-                        "elapsed": (time.perf_counter() - clock) / 86400,
-                        "status": (
-                            "Interrupted"
-                            if isinstance(error, KeyboardInterrupt)
-                            else "Failed"
-                        ),
-                        "last_output": previous,
-                    },
-                )
-            except Exception as audit_error:
-                logger.error(
-                    "Stage 4 failed and its audit could not be saved: %s", audit_error
-                )
-            raise
+        except Exception as audit_error:
+            logger.error(
+                "Stage 4 failed and its audit could not be saved: %s", audit_error
+            )
+        raise
 
 
 def _install_stage_four_panel(book: Any) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from io import StringIO
+import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -974,6 +975,7 @@ def _stage_four_run_case(
     )
     audit_writes: list[dict[str, object]] = []
     process_calls: list[dict[str, Any]] = []
+    guard_calls: list[tuple[Path, str | None]] = []
 
     monkeypatch.setattr(stage_four, "require_stage_four_panel", lambda book: None)
     monkeypatch.setattr(
@@ -994,9 +996,12 @@ def _stage_four_run_case(
     )
     monkeypatch.setattr(shared, "resolve_caller_path", lambda book: caller_path)
     monkeypatch.setattr(shared, "_caller_path", lambda book: caller_path)
-    monkeypatch.setattr(
-        shared, "workbook_run_guard", lambda path: contextlib.nullcontext()
-    )
+
+    def run_guard(path: Path, *, conflict_message: str | None = None) -> Any:
+        guard_calls.append((Path(path), conflict_message))
+        return contextlib.nullcontext()
+
+    monkeypatch.setattr(shared, "workbook_run_guard", run_guard)
     monkeypatch.setattr(
         shared,
         "portable_output_path",
@@ -1027,6 +1032,7 @@ def _stage_four_run_case(
             return None
 
     monkeypatch.setattr(stage_four.subprocess, "Popen", Process)
+    caller.guard_calls = guard_calls
     return (
         stage_four,
         caller,
@@ -1087,6 +1093,46 @@ def test_run_stage_four_backups_input_launches_in_model_folder_and_audits_succes
     assert call["shell"] is False
     assert call["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
     assert "timeout" not in call
+    assert caller.guard_calls == [
+        (caller_path, None),
+        (
+            workbook.parent.parent / "Stage 4 backup",
+            "A Stage 4 run is already in progress for this output folder",
+        ),
+    ]
+
+
+@pytest.mark.parametrize("log_level", [logging.INFO, logging.DEBUG])
+def test_run_stage_four_child_command_is_debug_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    log_level: int,
+) -> None:
+    stage_four, caller, _, _, csv_path, _, processes = _stage_four_run_case(
+        tmp_path, monkeypatch
+    )
+    monkeypatch.setattr(stage_four.logger, "handlers", [caplog.handler])
+    monkeypatch.setattr(stage_four.logger, "propagate", False)
+
+    with caplog.at_level(log_level, logger=stage_four.logger.name):
+        assert stage_four.run_stage_four(caller) == csv_path
+
+    assert "MACalc options:" in caplog.text
+    commands = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("MACalc child command:")
+    ]
+    if log_level == logging.INFO:
+        assert commands == []
+    else:
+        assert len(commands) == 1
+        assert commands[0].levelno == logging.DEBUG
+        assert commands[0].getMessage() == (
+            "MACalc child command: "
+            + stage_four.subprocess.list2cmdline(processes[0]["command"])
+        )
 
 
 def test_run_stage_four_replaces_fixed_backup_on_rerun(
@@ -1104,6 +1150,63 @@ def test_run_stage_four_replaces_fixed_backup_on_rerun(
 
     assert backup.read_bytes() == b"second input state"
     assert list(backup.parent.iterdir()) == [backup]
+
+
+def test_backup_stage_four_input_retains_only_the_latest_backup(
+    tmp_path: Path,
+) -> None:
+    stage_four = _stage_four()
+    run_folder = tmp_path / "SST Output_Test" / "Credit"
+    run_folder.mkdir(parents=True)
+    old_workbook = run_folder / "MACalc input_Test_0123456789abcdef.xlsb"
+    old_workbook.write_bytes(b"old input")
+    new_workbook = run_folder / "MACalc input_Test_fedcba9876543210.xlsb"
+    new_workbook.write_bytes(b"new input")
+    backup_folder = run_folder.parent / "Stage 4 backup"
+    unrelated = backup_folder / "notes.txt"
+    backup_folder.mkdir()
+    unrelated.write_text("not a Stage 4 backup", encoding="utf-8")
+    old_backup = backup_folder / old_workbook.name
+    old_backup.write_bytes(b"old backup")
+
+    latest = stage_four.backup_stage_four_input(new_workbook)
+
+    assert latest.read_bytes() == b"new input"
+    assert sorted(path.name for path in backup_folder.iterdir()) == [
+        latest.name,
+        unrelated.name,
+    ]
+
+
+def test_backup_stage_four_input_reports_failure_to_remove_old_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage_four = _stage_four()
+    run_folder = tmp_path / "SST Output_Test" / "Credit"
+    run_folder.mkdir(parents=True)
+    old_workbook = run_folder / "MACalc input_Test_0123456789abcdef.xlsb"
+    old_workbook.write_bytes(b"old input")
+    backup_folder = run_folder.parent / "Stage 4 backup"
+    backup_folder.mkdir()
+    old_backup = backup_folder / old_workbook.name
+    old_backup.write_bytes(b"old backup")
+    new_workbook = run_folder / "MACalc input_Test_fedcba9876543210.xlsb"
+    new_workbook.write_bytes(b"new input")
+    real_unlink = stage_four.os.unlink
+
+    def deny_old_backup(path: str | Path, *args: Any, **kwargs: Any) -> None:
+        if Path(path) == old_backup:
+            raise OSError("backup is locked")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(stage_four.os, "unlink", deny_old_backup)
+
+    with pytest.raises(stage_four.StageFourError, match="Could not remove previous"):
+        stage_four.backup_stage_four_input(new_workbook)
+
+    assert old_backup.read_bytes() == b"old backup"
+    assert (backup_folder / new_workbook.name).read_bytes() == b"new input"
 
 
 def test_run_stage_four_does_not_launch_when_backup_creation_fails(

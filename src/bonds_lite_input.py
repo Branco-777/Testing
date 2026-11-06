@@ -1054,7 +1054,7 @@ Private Function ResolveLocalBundle() As String
     If filesystem.FileExists(localPointer) Then
         On Error Resume Next
         Set stream = filesystem.OpenTextFile(localPointer, 1, False, 0)
-        localReleaseId = Trim$(stream.ReadAll)
+        localReleaseId = Replace(Replace(Trim$(stream.ReadAll), vbCr, ""), vbLf, "")
         stream.Close
         Err.Clear
         On Error GoTo CopyFailed
@@ -1072,7 +1072,7 @@ Private Function ResolveLocalBundle() As String
         Err.Raise vbObjectError + 414, , "The central Bonds Lite release pointer is unavailable"
     End If
     Set stream = filesystem.OpenTextFile(pointerPath, 1, False, 0)
-    releaseId = Trim$(stream.ReadAll)
+    releaseId = Replace(Replace(Trim$(stream.ReadAll), vbCr, ""), vbLf, "")
     stream.Close
     If Not pattern.Test(releaseId) Then
         Err.Raise vbObjectError + 415, , "The central Bonds Lite release pointer is invalid"
@@ -2788,7 +2788,11 @@ def workbook_mutex_name(caller: Path) -> str:
 
 
 @contextmanager
-def workbook_run_guard(caller: Path) -> Iterator[None]:
+def workbook_run_guard(
+    caller: Path,
+    *,
+    conflict_message: str = "A Bonds Lite run is already in progress for this workbook",
+) -> Iterator[None]:
     """Prevent concurrent runs for the same caller within a Windows session."""
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
@@ -2800,7 +2804,7 @@ def workbook_run_guard(caller: Path) -> Iterator[None]:
         raise ctypes.WinError(ctypes.get_last_error())
     if ctypes.get_last_error() == 183:
         kernel.CloseHandle(handle)
-        raise BondsLiteError("A Bonds Lite run is already in progress for this workbook")
+        raise BondsLiteError(conflict_message)
     try:
         yield
     finally:
@@ -2959,7 +2963,8 @@ def main() -> int:
     caller_path_token = None
     with run_progress() as progress:
         logger.info(
-            "Bonds Lite input started | timings exclude Python startup and the Enter wait"
+            f"Stage {arguments.stage} started | timings exclude Python startup "
+            "and the Enter wait"
         )
         try:
             with timed_stage("Locate calling Excel workbook"):
@@ -3008,10 +3013,13 @@ def main() -> int:
                 else:
                     logger.info(f"Saved Bonds Lite inputs in run folder:\n{output}")
         except KeyboardInterrupt:
-            logger.error("Run interrupted by the user; managed cleanup has finished")
+            logger.error(
+                f"Stage {arguments.stage} interrupted by the user; "
+                "managed cleanup has finished"
+            )
             result = 1
         except Exception as error:
-            logger.error(f"Bonds Lite input failed: {error}")
+            logger.error(f"Stage {arguments.stage} failed: {error}")
             result = 1
         finally:
             if caller_path_token is not None:

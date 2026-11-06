@@ -778,3 +778,28 @@ The packaged controller and a new packaged MACalc model app are built, and the r
 - Remove the link check entirely. Rejected because it guards against Excel silently re-pathing the remaining links.
 **Rationale:**
 - The `202512 - JRL - MACalcinPython_v4.0f_100bpsSpread_updREIT.xlsb` template links rows 21+ of `I. Assets` to an old model CSV and to another MACalc workbook. Excel removes those links as soon as the rows are cleared, so the count check always failed.
+
+### Decision 85: Retain Only The Latest Stage 4 Backup (2026-11-06)
+**Question:** Should the Stage 4 backup folder keep backups for every Stage 3 workbook, or only the most recent pre-run input?
+**Decided by:** User, 6 November 2026.
+**Choice:**
+- Keep only the latest verified Stage 4 pre-run workbook in `SST Output_<suffix>/Stage 4 backup`.
+- Remove older matching MACalc backup workbooks after the new backup has been copied and verified.
+- Serialise Stage 4 runs targeting the same output folder within a Windows session, so active recovery backups are not removed by another local run.
+- Remove the identified stale Stage 3 staging folder; do not remove staging files while a Stage 3 run is active.
+**Alternatives considered:**
+- Keep one backup for each distinct MACalc input. Rejected because the user preferred only the latest backup.
+- Disable Stage 4 backups. Rejected because a pre-run recovery copy remains useful if MACalc fails.
+**Rationale:** Limit output-folder clutter while preserving a verified recovery copy for the most recent Stage 4 attempt.
+
+### Decision 86: Identify The Stage In Console Messages And Hide The MACalc Command (2026-11-06)
+**Question:** How should the shared controller identify the stage being run, and should the raw MACalc child command appear in normal console output?
+**Decided by:** User, 6 November 2026.
+**Choice:**
+- Stage runs open with `Starting Stage <N>...` before the workflow is imported; the timing, failure and interruption messages also identify the selected stage.
+- Self-test, installation and help commands keep the generic controller banner.
+- The raw `MACalc child command:` message is DEBUG-only. Readable MACalc options, progress and errors remain visible, without adding log files or verbosity settings.
+**Alternatives considered:**
+- Keep the generic opening message and the raw command at INFO. Rejected because the user wanted to identify the stage and avoid technical argument text in normal output.
+- Remove the command diagnostic entirely. Rejected because it remains useful when DEBUG logging is enabled during troubleshooting.
+**Rationale:** Make the console clearer without losing early startup feedback or useful diagnostic information.

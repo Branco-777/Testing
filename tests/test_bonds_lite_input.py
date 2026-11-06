@@ -1572,6 +1572,9 @@ def test_packaged_launcher_uses_release_only_as_copy_source_and_launches_cache()
     launcher = workflow.PACKAGED_VBA_LAUNCHER
     compact = re.sub(r"\s*_\s*\r?\n\s*", "", launcher)
     assert "current.txt" in launcher
+    assert launcher.count(
+        'Replace(Replace(Trim$(stream.ReadAll), vbCr, ""), vbLf, "")'
+    ) == 2
     assert "CopyFolder" in launcher
     assert "Bonds Lite App" in launcher
     assert re.search(r"(?i)Controller\\BondsLiteController\.exe", compact)
@@ -1903,7 +1906,7 @@ def test_excel_cache_falls_back_to_previous_bundle_when_new_release_incomplete(
 
     release_root = tmp_path / "central release source"
     release_root.mkdir()
-    (release_root / "current.txt").write_text("new-release", encoding="ascii")
+    (release_root / "current.txt").write_bytes(b"new-release\r\n")
     local_app_data = tmp_path / "Local App Data"
     local_root = local_app_data / "BondsLite"
     cached = local_root / "releases" / "old-release" / "Bonds Lite App"
@@ -1915,7 +1918,7 @@ def test_excel_cache_falls_back_to_previous_bundle_when_new_release_incomplete(
         target = cached / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("sentinel", encoding="ascii")
-    (local_root / "current.txt").write_text("old-release", encoding="ascii")
+    (local_root / "current.txt").write_bytes(b"old-release\r\n")
 
     launcher = workflow.PACKAGED_VBA_LAUNCHER.replace(
         r"\\server090\internal model$\29 Financial Resilience\Sandbox\SST spreadsheet executable file",
@@ -5881,11 +5884,18 @@ def test_excel_full_workflow_missing_dependency_does_not_publish(
 def test_workbook_run_guard_rejects_duplicate_and_releases(tmp_path: Path) -> None:
     from bonds_lite_input import workbook_run_guard
 
-    with workbook_run_guard(tmp_path / "Caller.xlsm"):
+    caller = tmp_path / "Caller.xlsm"
+    with workbook_run_guard(caller):
         with pytest.raises(BondsLiteError, match="already"):
-            with workbook_run_guard(tmp_path / "Caller.xlsm"):
+            with workbook_run_guard(caller):
                 pytest.fail("Duplicate run entered")
-    with workbook_run_guard(tmp_path / "Caller.xlsm"):
+        with pytest.raises(BondsLiteError, match="output folder"):
+            with workbook_run_guard(
+                caller,
+                conflict_message="A Stage 4 run is already in this output folder",
+            ):
+                pytest.fail("Duplicate run entered")
+    with workbook_run_guard(caller):
         pass
 
 
@@ -7223,6 +7233,59 @@ def test_main_stage_dispatch_keeps_default_one_and_treats_stage_two_cancellation
     assert all(reporter.joined for reporter in reporting_threads)
 
 
+@pytest.mark.parametrize("stage", [None, "1", "2", "3", "4"])
+@pytest.mark.parametrize("outcome", ["success", "failure", "interrupted"])
+def test_main_console_messages_identify_the_selected_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    console_logger: logging.Logger,
+    reporting_threads: list[Any],
+    capsys: pytest.CaptureFixture[str],
+    stage: str | None,
+    outcome: str,
+) -> None:
+    import bonds_lite_input as workflow
+
+    caller = SimpleNamespace(api=SimpleNamespace(FullName="Draft.xlsm"))
+    app = SimpleNamespace(api=SimpleNamespace(Hwnd=1234), books=[caller])
+    monkeypatch.setitem(sys.modules, "xlwings", SimpleNamespace(apps=[app]))
+    arguments = ["bonds_lite_input", "--caller", "Draft.xlsm", "--excel-hwnd", "1234"]
+    if stage is not None:
+        arguments.extend(["--stage", stage])
+    monkeypatch.setattr(sys, "argv", arguments)
+
+    def run(book: Any) -> Path:
+        assert book is caller
+        if outcome == "failure":
+            raise BondsLiteError("stage failure sentinel")
+        if outcome == "interrupted":
+            raise KeyboardInterrupt
+        return Path("SST Output_Test/Credit")
+
+    monkeypatch.setattr(workflow, "run_stage_one", run)
+    monkeypatch.setattr(workflow, "run_stage_two", run)
+    monkeypatch.setitem(
+        sys.modules, "sst_stage_three", SimpleNamespace(run_stage_three=run)
+    )
+    monkeypatch.setitem(
+        sys.modules, "sst_stage_four", SimpleNamespace(run_stage_four=run)
+    )
+
+    assert workflow.main() == (0 if outcome == "success" else 1)
+
+    console = capsys.readouterr().out
+    selected = stage or "1"
+    assert console.startswith(
+        f"Stage {selected} started | timings exclude Python startup"
+    )
+    if outcome == "failure":
+        assert f"Stage {selected} failed: stage failure sentinel" in console
+    elif outcome == "interrupted":
+        assert f"Stage {selected} interrupted by the user" in console
+    assert "Bonds Lite input started" not in console
+    assert "Bonds Lite input failed" not in console
+    assert all(reporter.joined for reporter in reporting_threads)
+
+
 @pytest.mark.parametrize("stage", ["0", "two", "5"])
 def test_main_rejects_invalid_stage_before_connecting_to_excel(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], stage: str,
@@ -8055,20 +8118,68 @@ def test_packaged_model_entry_preflight_imports_runtime_without_batch(
     assert "Loading" in output
 
 
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        ([], "Starting Bonds Lite controller..."),
+        (["--caller", "Draft.xlsm"], "Starting Stage 1..."),
+        (["--caller", "Draft.xlsm", "--stage", "1"], "Starting Stage 1..."),
+        (["--caller", "Draft.xlsm", "--stage", "2"], "Starting Stage 2..."),
+        (["--caller", "Draft.xlsm", "--stage", "3"], "Starting Stage 3..."),
+        (["--caller", "Draft.xlsm", "--stage", "4"], "Starting Stage 4..."),
+        (["--caller", "Draft.xlsm", "--stage=4"], "Starting Stage 4..."),
+        (["--self-test"], "Starting Bonds Lite controller..."),
+        (
+            [
+                "--install-button",
+                "Draft.xlsm",
+                "--caller",
+                "Draft.xlsm",
+                "--stage",
+                "4",
+            ],
+            "Starting Bonds Lite controller...",
+        ),
+        (
+            ["--help", "--caller", "Draft.xlsm", "--stage", "4"],
+            "Starting Bonds Lite controller...",
+        ),
+        (
+            ["--self-test", "--caller", "Draft.xlsm", "--stage", "4"],
+            "Starting Bonds Lite controller...",
+        ),
+    ],
+)
 def test_controller_entry_prints_before_workflow_import(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    arguments: list[str],
+    expected: str,
 ) -> None:
     import runpy
 
     project = Path(__file__).resolve().parents[1]
-    monkeypatch.setitem(sys.modules, "bonds_lite_input", SimpleNamespace(main=lambda: 0))
-    monkeypatch.setattr(sys, "argv", ["controller_entry"])
+    monkeypatch.setitem(
+        sys.modules, "bonds_lite_input", SimpleNamespace(main=lambda: 0)
+    )
+    monkeypatch.setattr(sys, "argv", ["controller_entry", *arguments])
+    original_import = __import__
+    before_workflow_import: list[str] = []
+
+    def import_module(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "bonds_lite_input":
+            before_workflow_import.append(capsys.readouterr().out)
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", import_module)
 
     with pytest.raises(SystemExit) as caught:
-        runpy.run_path(str(project / "tools" / "controller_entry.py"), run_name="__main__")
+        runpy.run_path(
+            str(project / "tools" / "controller_entry.py"), run_name="__main__"
+        )
 
     assert caught.value.code == 0
-    assert capsys.readouterr().out.startswith("Starting Bonds Lite controller")
+    assert before_workflow_import == [f"{expected}\n"]
 
 
 def test_read_model_inputs_follows_moved_names_instead_of_cell_addresses(
