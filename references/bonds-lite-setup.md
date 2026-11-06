@@ -42,11 +42,18 @@ existing scenario inputs, templates and output paths as configured; those data
 paths are separate from the application cache. Do not copy application files
 between releases or delete LocalAppData cache folders while a run is active.
 
-**Deployment status:** release `20261106-cache-v15` (Stages 1-4, built from
-`e7f2d15`) is active in the central pointer since 6 November 2026. It lets
-Stage 3 accept MACalc templates whose asset rows hold the only links to a file
-(Decision 84). Packaged button acceptance of v15 is pending. Release
-`20261106-cache-v14` (built from
+**Deployment status:** release `20261106-cache-v16` (Stages 1-4, built from
+`b03090a`) is active in the central pointer since 6 November 2026. Its
+controller, model and MACalc packaged self-tests passed. It retains only the
+latest verified Stage 4 pre-run backup (Decision 85), identifies the selected
+stage in console startup and error messages, and hides the raw MACalc child
+command from normal output (Decision 86). Full end-to-end acceptance of v16 is
+pending. The user reported a successful Stage 1-4 comparison against a live
+example before this release.
+
+Release `20261106-cache-v15` (built from `e7f2d15`) lets Stage 3 accept MACalc
+templates whose asset rows hold the only links to a file (Decision 84).
+Release `20261106-cache-v14` (built from
 `2f7326f`) made
 Stages 2-4 save the Draft automatically before starting, so an unsaved edit
 such as a changed MACalc template path no longer blocks a run (Decision 83).
@@ -134,7 +141,7 @@ The supplied source was rescanned as B8:ATT1066, or 1,058 bond rows; the supplie
 6. Follow the stages in the visible console. If the credit flags and I. Credit Stresses are inconsistent, Stage 1 first lists every inconsistency and asks `Proceed with these inconsistencies? [y/N]`. Answer `y` or `yes` to continue with the stresses exactly as shown. Any other answer, or a blank, cancels the run: no folder is created or replaced and the Stage 1 audit is left as it was, so fix the flags or the stresses and rerun. Wait for the saved-path or failure summary and total processing time. Audit persistence, cleanup and guard release finish before the console asks you to press Enter to close it. A second simultaneous run for the same Draft is rejected without changing the active run's audit. A failure message is not a successful output.
 7. After Stage 1 succeeds and its saved handoff is current, click **Run Bonds Lite**. Stage 2 passes that run folder to the batch script once. Close both generated inputs in Excel first. If old results exist, answer `y` to the console overwrite question; blank or any other answer defaults to No. Stage 2 allows up to 60 minutes for the complete batch.
 
-**Pending next controller release (Decision 86; not in live v15 yet):** the console opens with `Starting Stage <N>...`, followed by a stage-labelled timing line. Failure and interruption summaries also identify the stage. Stage 4 hides the raw `MACalc child command:` line from normal console output; it is available only at DEBUG level. The readable MACalc options, progress and errors remain visible.
+The controller opens with `Starting Stage <N>...`, followed by a stage-labelled timing line. Failure and interruption summaries also identify the stage. Stage 4 hides the raw `MACalc child command:` line from normal console output; it is available only at DEBUG level. The readable MACalc options, progress and errors remain visible.
 
 The workflow generates two workbooks using all credit blocks, regardless of scenario toggles. Date, entity and stresses are captured once, so both outputs use the same settings even if controls are subsequently edited. Stage 2 executes the Bonds Lite model only after a saved Stage 1 handoff is validated. Entity must be nonempty Windows-safe text with no surrounding whitespace because it is used unchanged in directory names.
 
@@ -465,9 +472,7 @@ older MACalc inputs outside the stress folder; follow the checks in the
 
 ### Input, backup and outputs
 
-MACalc Batch runs in place on the audited workbook in `SST Output_<suffix>\Credit`. It does not create a separate Stage 4 input copy. Live v15 keeps one pre-run backup for each workbook at `SST Output_<suffix>\Stage 4 backup\<workbook name>`.
-
-The pending next controller release (Decision 85) verifies the new backup, then removes older matching MACalc backups so the folder retains only that latest pre-run input. Stage 4 runs targeting the same output folder are serialised within the Windows session. If MACalc fails, its pre-run backup is retained; "latest" means the most recent attempt, not the most recent successful run. If you rerun Stage 4 without rerunning Stage 3 first, the backup contains the prior Stage 4 result; rerun Stage 3 when you need a clean input.
+MACalc Batch runs in place on the audited workbook in `SST Output_<suffix>\Credit`. It does not create a separate Stage 4 input copy. Stage 4 verifies the pre-run backup at `SST Output_<suffix>\Stage 4 backup\<workbook name>`, then removes older matching MACalc backups so the folder retains only the latest verified copy (Decision 85). Runs targeting the same output folder are serialised within the Windows session. If MACalc fails, its pre-run backup is retained; "latest" means the most recent attempt, not the most recent successful run. If you rerun Stage 4 without rerunning Stage 3 first, the backup contains the prior Stage 4 result; rerun Stage 3 when you need a clean input.
 
 The expected result is `<workbook stem>_unoptimised_assets.csv` beside the workbook. MACalc runs with binary optimisation OFF, the optimisation pass OFF and the cost-of-default floor ON. The Draft's `SST_Credit_DG_standalone` value is passed as the downgrade flag; that option is currently inactive while optimisation is OFF. A successful process and a non-empty CSV confirm execution, not the reasonableness of the figures. Review the results before sign-off.
 
