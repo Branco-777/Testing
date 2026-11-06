@@ -37,17 +37,19 @@ existing scenario inputs, templates and output paths as configured; those data
 paths are separate from the application cache. Do not copy application files
 between releases or delete LocalAppData cache folders while a run is active.
 
-**Deployment status:** release `20261105-cache-v12` (Stages 1-4, built from
-`9ac5979` plus the live-output and read-only cleanup changes) is active in the
-central pointer since 5 November 2026. It keeps the v10 SST Output layout and
-Stage 3/4 support, adds line-buffered live model output in Stage 2 with a
-30-second quiet-period heartbeat, and retries deletion of OneDrive read-only
-`~replacing Credit ...` backups and failed Stage 1 folders. Release
-`20261104-cache-v11` was built from stale source (legacy `Bonds Lite output`
-folders, no Stages 3/4) and must never be promoted. The packaged Stage 2 run of
-v12 is pending user acceptance. Each user's LocalAppData cache updates when Excel next
-checks the pointer on a button click; restart Excel if it is already open. To
-roll back, write `20261104-cache-v10` to the central `current.txt`. The backed-up Draft has the three Stage 1 path names installed.
+**Deployment status:** release `20261106-cache-v13` (Stages 1-4, built from
+`eb098ea`) is active in the central pointer since 6 November 2026. It adds the
+Stage 3 fix that reconciles MACE funded assets with the Stage 1 Bonds input
+instead of MAP (Decision 82); its Model and MACalc executables are identical to
+v12. Release `20261105-cache-v12` added line-buffered live model output in
+Stage 2 with a 30-second quiet-period heartbeat, and retries deletion of
+OneDrive read-only `~replacing Credit ...` backups and failed Stage 1 folders.
+Release `20261104-cache-v11` was built from stale source (legacy `Bonds Lite
+output` folders, no Stages 3/4) and must never be promoted. Packaged Stage 2-4
+button runs on v13 are pending user acceptance. Each user's LocalAppData cache
+updates when Excel next checks the pointer on a button click; restart Excel if
+it is already open. To roll back, write `20261105-cache-v12` to the central
+`current.txt`. The backed-up Draft has the three Stage 1 path names installed.
 No path-control movement is required; moving a control is optional.
 
 ### Maintainers: Source Mode
