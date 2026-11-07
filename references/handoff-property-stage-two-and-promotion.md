@@ -153,8 +153,9 @@ Remaining acceptance items:
    workbooks, and obtain explicit promotion approval.
 
 The source-mode P1 path has been tested; the actual installed VBA button path
-remains an acceptance item. The Stage 2 button is not yet installed in the
-live Draft.
+remains an acceptance item. The Stage 2 button and panel were installed in the
+live Draft on 7 November 2026 (backup
+`Draft Input spreadsheet for SST_20261107_034448_279086.xlsm`).
 
 ## Worktree and team-context cautions
 
