@@ -171,8 +171,99 @@ def test_open_workbook_must_match_the_stage_one_handoff(tmp_path: Path) -> None:
 
     with pytest.raises(BondsLiteError, match="unexpected LTM workbook"):
         stage_two._require_expected_workbook(
-            SimpleNamespace(fullname=str(actual)), expected
+            SimpleNamespace(api=SimpleNamespace(FullName=str(actual))),
+            expected,
+            SimpleNamespace(api=SimpleNamespace(FullName=str(tmp_path / "Draft.xlsm"))),
+            tmp_path / "Draft.xlsm",
         )
+
+
+_SHAREPOINT_FOLDER = (
+    "https://example.sharepoint.com/sites/Team/Shared Documents/General/Testing"
+)
+
+
+class _AmbiguousSharePointBook:
+    """Excel book whose xlwings fullname fails as for duplicate synced names."""
+
+    def __init__(self, url: str) -> None:
+        self.api = SimpleNamespace(FullName=url)
+
+    @property
+    def fullname(self) -> str:
+        raise RuntimeError("Your SharePoint configuration either requires ...")
+
+
+def test_excel_local_path_maps_sharepoint_url_through_draft_folder(
+    tmp_path: Path,
+) -> None:
+    stage_two = _stage_two()
+    caller = _AmbiguousSharePointBook(f"{_SHAREPOINT_FOLDER}/Draft.xlsm")
+    workbook = _AmbiguousSharePointBook(
+        f"{_SHAREPOINT_FOLDER}/SST%20Output_Test/Property/LTM_Test.xlsb"
+    )
+
+    result = stage_two._excel_local_path(workbook, caller, tmp_path / "Draft.xlsm")
+
+    assert result == (tmp_path / "SST Output_Test" / "Property" / "LTM_Test.xlsb").resolve()
+
+
+def test_require_expected_workbook_accepts_sharepoint_url_with_duplicate_name(
+    tmp_path: Path,
+) -> None:
+    stage_two = _stage_two()
+    expected = tmp_path / "SST Output_Test" / "Property" / "LTM_Test.xlsb"
+    expected.parent.mkdir(parents=True)
+    expected.touch()
+    duplicate = expected.parent / "~property-stage1-x" / expected.name
+    duplicate.parent.mkdir()
+    duplicate.touch()
+
+    stage_two._require_expected_workbook(
+        _AmbiguousSharePointBook(
+            f"{_SHAREPOINT_FOLDER}/SST Output_Test/Property/LTM_Test.xlsb"
+        ),
+        expected,
+        _AmbiguousSharePointBook(f"{_SHAREPOINT_FOLDER}/Draft.xlsm"),
+        tmp_path / "Draft.xlsm",
+    )
+
+
+def test_require_expected_workbook_reports_unmappable_url(tmp_path: Path) -> None:
+    stage_two = _stage_two()
+    expected = tmp_path / "LTM_Test.xlsb"
+    expected.touch()
+
+    with pytest.raises(BondsLiteError, match="Cannot map the LTM workbook"):
+        stage_two._require_expected_workbook(
+            _AmbiguousSharePointBook("https://other.sharepoint.com/x/LTM_Test.xlsb"),
+            expected,
+            _AmbiguousSharePointBook(f"{_SHAREPOINT_FOLDER}/Draft.xlsm"),
+            tmp_path / "Draft.xlsm",
+        )
+
+
+def test_ensure_workbook_not_open_detects_sharepoint_url_without_fullname(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import xlwings
+
+    stage_two = _stage_two()
+    target = tmp_path / "SST Output_Test" / "Property" / "LTM_Test.xlsb"
+    caller = _AmbiguousSharePointBook(f"{_SHAREPOINT_FOLDER}/Draft.xlsm")
+    other = _AmbiguousSharePointBook("https://other.sharepoint.com/x/Other.xlsb")
+    opened = _AmbiguousSharePointBook(
+        f"{_SHAREPOINT_FOLDER}/SST Output_Test/Property/LTM_Test.xlsb"
+    )
+    monkeypatch.setattr(
+        xlwings, "apps", [SimpleNamespace(books=[caller, other, opened])]
+    )
+
+    with pytest.raises(BondsLiteError, match="Close LTM_Test.xlsb"):
+        stage_two._ensure_workbook_not_open(target, caller, tmp_path / "Draft.xlsm")
+
+    monkeypatch.setattr(xlwings, "apps", [SimpleNamespace(books=[caller, other])])
+    stage_two._ensure_workbook_not_open(target, caller, tmp_path / "Draft.xlsm")
 
 
 def test_verify_ltm_run_requires_fresh_timestamps_and_all_outputs() -> None:
@@ -361,6 +452,7 @@ def _run_harness(
 
     workbook.save = save
     workbook.fullname = str(target)
+    workbook.api.FullName = str(target)
 
     class FakeApplication:
         def __init__(self) -> None:
@@ -404,7 +496,7 @@ def _run_harness(
         ),
     )
     monkeypatch.setattr(stage_two, "_check_runner", lambda: None)
-    monkeypatch.setattr(stage_two, "_ensure_workbook_not_open", lambda _path: None)
+    monkeypatch.setattr(stage_two, "_ensure_workbook_not_open", lambda *_args: None)
     monkeypatch.setattr(
         stage_two,
         "write_property_stage_two_audit",
@@ -413,7 +505,10 @@ def _run_harness(
             events.append(("audit", fields["status"])),
         ),
     )
-    caller = SimpleNamespace(fullname=str(tmp_path / "Draft.xlsm"))
+    caller = SimpleNamespace(
+        fullname=str(tmp_path / "Draft.xlsm"),
+        api=SimpleNamespace(FullName=str(tmp_path / "Draft.xlsm")),
+    )
     return stage_two, events, audits, caller, target
 
 

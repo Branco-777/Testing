@@ -5,6 +5,7 @@ from __future__ import annotations
 import getpass
 import logging
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -14,6 +15,7 @@ from datetime import date, datetime, timedelta
 from numbers import Real
 from pathlib import Path
 from typing import Any, Iterator
+from urllib.parse import unquote
 
 import bonds_lite_input as shared
 import sst_property_stage_one as stage_one
@@ -376,7 +378,27 @@ def _validate_local_run_settings(workbook: Any) -> None:
         )
 
 
-def _ensure_workbook_not_open(path: Path) -> None:
+def _excel_local_path(workbook: Any, caller: Any, caller_path: Path) -> Path:
+    """Map Excel's FullName to a local path through the Draft's own location.
+
+    xlwings maps synced SharePoint URLs by searching for the file name, which
+    fails when OneDrive holds another file with the same name.
+    """
+    raw = str(workbook.api.FullName)
+    if not re.match(r"^[a-z]+://", raw, re.IGNORECASE):
+        return Path(raw).resolve()
+    caller_raw = unquote(str(caller.api.FullName))
+    value = unquote(raw)
+    if re.match(r"^[a-z]+://", caller_raw, re.IGNORECASE):
+        folder = caller_raw.rsplit("/", 1)[0] + "/"
+        if value.casefold().startswith(folder.casefold()):
+            return caller_path.parent.joinpath(*value[len(folder):].split("/")).resolve()
+    raise PropertyStageTwoError(
+        f"Cannot map the LTM workbook location to a local path: {raw}"
+    )
+
+
+def _ensure_workbook_not_open(path: Path, caller: Any, caller_path: Path) -> None:
     """Reject a target already open in any Excel instance before writing."""
     try:
         import xlwings as xw
@@ -385,10 +407,10 @@ def _ensure_workbook_not_open(path: Path) -> None:
         for application in xw.apps:
             for workbook in application.books:
                 try:
-                    opened = os.path.normcase(str(Path(workbook.fullname).resolve()))
-                except (OSError, ValueError):
-                    opened = os.path.normcase(str(workbook.fullname))
-                if opened == wanted:
+                    opened = _excel_local_path(workbook, caller, caller_path)
+                except PropertyStageTwoError:
+                    continue
+                if os.path.normcase(str(opened)) == wanted:
                     raise PropertyStageTwoError(
                         f"Close {path.name} in Excel before running Property Stage 2"
                     )
@@ -400,11 +422,15 @@ def _ensure_workbook_not_open(path: Path) -> None:
         ) from error
 
 
-def _require_expected_workbook(workbook: Any, expected_path: Path) -> None:
+def _require_expected_workbook(
+    workbook: Any, expected_path: Path, caller: Any, caller_path: Path
+) -> None:
     """Confirm Excel opened the exact Stage 1 handoff in the owned instance."""
     try:
-        actual_path = Path(workbook.fullname).resolve(strict=True)
-    except (OSError, ValueError, AttributeError) as error:
+        actual_path = _excel_local_path(workbook, caller, caller_path)
+    except PropertyStageTwoError:
+        raise
+    except Exception as error:
         raise PropertyStageTwoError(
             f"Cannot verify the opened LTM workbook path: {error}"
         ) from error
@@ -513,7 +539,7 @@ def run_property_stage_two(caller: Any) -> Path:
             inputs = resolve_property_stage_two_inputs(caller)
             workbook_link = _portable_workbook_path(caller_path, inputs.workbook_path)
             _check_runner()
-            _ensure_workbook_not_open(inputs.workbook_path)
+            _ensure_workbook_not_open(inputs.workbook_path, caller, caller_path)
             write_property_stage_two_audit(
                 caller,
                 _audit_values(
@@ -538,7 +564,9 @@ def run_property_stage_two(caller: Any) -> Path:
                 update_links=False,
                 read_only=False,
             )
-            _require_expected_workbook(workbook, inputs.workbook_path)
+            _require_expected_workbook(
+                workbook, inputs.workbook_path, caller, caller_path
+            )
             if workbook.api.ReadOnly:
                 raise PropertyStageTwoError(
                     "Property Stage 1 output workbook is read-only"
