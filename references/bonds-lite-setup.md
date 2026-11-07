@@ -42,8 +42,16 @@ existing scenario inputs, templates and output paths as configured; those data
 paths are separate from the application cache. Do not copy application files
 between releases or delete LocalAppData cache folders while a run is active.
 
-**Deployment status:** release `20261106-cache-v16` (Stages 1-4, built from
-`b03090a`) is active in the central pointer since 6 November 2026. Its
+**Deployment status:** release `20261107-cache-v17` (Credit Stages 1-4 and
+Property Stages P1/P2, built from `4db7698`) is active in the central pointer
+since 7 November 2026. Its controller, model and MACalc self-tests passed, its
+executable hashes match `release.json`, and its controller accepts `--stage P1`
+and `--stage P2`. The model and MACalc sources are byte-identical to v16. To roll
+back, write `20261106-cache-v16` to the central `current.txt` (plain ASCII, no
+trailing newline).
+
+Release `20261106-cache-v16` (Stages 1-4, built from
+`b03090a`) was active from 6 November 2026. Its
 controller, model and MACalc packaged self-tests passed. It retains only the
 latest verified Stage 4 pre-run backup (Decision 85), identifies the selected
 stage in console startup and error messages, and hides the raw MACalc child
@@ -525,10 +533,8 @@ VBA project. The installed **Prepare LTM Flash** button invokes Property
 Stage 1 through the source-mode controller. It shares the Draft run guard with
 the Credit stages, so only one stress stage can run at a time.
 
-The `P1` command token is available to the source controller. The currently
-deployed packaged release does not include Property Stage 1; do not install
-the Property button into a packaged Draft until a separate packaged release
-has been built, tested and approved.
+The `P1` command token is available to the source controller and, from
+release `20261107-cache-v17`, to the packaged controller.
 
 ## Property Stage 2 - Run LTM Flash
 
@@ -573,9 +579,9 @@ Draft states and retains the previous `Last Successful Run`.
 
 The LTM macro normally clears `O. NoteVal` and the `O. NoteValRebase` table.
 Stage 2 does not snapshot, restore, validate or populate these areas. The
-`P2` source-controller token is available, but the currently deployed
-packaged release does not include Property Stage 2. A real LTM run, live Draft
-installation, and combined package promotion require separate user approval.
+`P2` token is available to the source controller and, from release
+`20261107-cache-v17`, to the packaged controller. A real LTM run and live Draft
+installation of the Stage 2 button require separate user approval.
 
 ## Glossary
 

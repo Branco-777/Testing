@@ -135,12 +135,13 @@ remain separate approval gates.
 
 ## Combined promotion gates
 
-The Stage 1 package changes are present in source/build configuration, but the
-currently deployed packaged release does not include `P1`. Do not install the
-Property button into a packaged Draft until the combined release is built,
-tested and approved.
+The combined release `20261107-cache-v17` was built from `4db7698` and
+promoted on 7 November 2026 at the user's request. All three self-tests passed,
+the executable hashes match the manifest, and the packaged controller accepts
+`P1` and `P2`. The live Draft's launcher resolves and caches v17. Rollback means
+writing `20261106-cache-v16` to the central `current.txt`.
 
-Before promoting Stage 1 and Stage 2 together:
+Remaining acceptance items:
 
 1. Complete and approve the Stage 2 plan and decisions.
 2. Implement and test Stage 2 without dropping Stage 1 coverage.
@@ -152,8 +153,8 @@ Before promoting Stage 1 and Stage 2 together:
    workbooks, and obtain explicit promotion approval.
 
 The source-mode P1 path has been tested; the actual installed VBA button path
-remains an acceptance item. The packaged release has not been built or
-promoted.
+remains an acceptance item. The Stage 2 button is not yet installed in the
+live Draft.
 
 ## Worktree and team-context cautions
 
