@@ -459,7 +459,10 @@ def _run_harness(
             self.api = SimpleNamespace(
                 AutomationSecurity=None,
                 DisplayAlerts=True,
-                WorksheetFunction=SimpleNamespace(Now=lambda: invocation_time),
+                # Real Excel has no WorksheetFunction.Now; NOW() is only evaluable.
+                Evaluate=lambda formula: (
+                    invocation_time if formula == "NOW()" else pytest.fail(formula)
+                ),
                 CalculateFullRebuild=lambda: events.append(("recalculate",)),
             )
             self.books = SimpleNamespace(

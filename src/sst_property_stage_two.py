@@ -230,7 +230,8 @@ def _excel_datetime(value: object, name: str) -> datetime:
 def _excel_now(application: Any) -> datetime:
     """Capture the invocation instant using the owned Excel instance's clock."""
     try:
-        value = application.api.WorksheetFunction.Now()
+        # WorksheetFunction has no Now method; Evaluate returns NOW() as a serial date.
+        value = application.api.Evaluate("NOW()")
     except Exception as error:
         raise PropertyStageTwoError(
             f"Cannot read the LTM Excel invocation time: {error}"
