@@ -499,6 +499,31 @@ def _record_failure(
     )
 
 
+def _file_changed_since(path: Path, mtime_ns: int) -> bool:
+    """Return True if the file was modified, or is missing, since ``mtime_ns``."""
+    try:
+        return path.stat().st_mtime_ns != mtime_ns
+    except OSError:
+        return True
+
+
+def _disable_autosave(workbook: Any) -> None:
+    """Stop AutoSave writing partial LTM results over the Stage 1 workbook."""
+    try:
+        if workbook.api.AutoSaveOn:
+            workbook.api.AutoSaveOn = False
+        still_on = bool(workbook.api.AutoSaveOn)
+    except Exception as error:
+        raise PropertyStageTwoError(
+            f"Could not turn off AutoSave for the LTM Flash workbook: {error}"
+        ) from error
+    if still_on:
+        raise PropertyStageTwoError(
+            "AutoSave is still on for the LTM Flash workbook; it would save "
+            "partial results before verification"
+        )
+
+
 def _invoke_ltm(
     workbook: Any, application: Any, invocation_time: datetime, scenarios: int
 ) -> None:
@@ -567,6 +592,7 @@ def run_property_stage_two(caller: Any) -> Path:
                 read_only=False,
                 ignore_read_only_recommended=True,
             )
+            _disable_autosave(workbook)
             _require_expected_workbook(
                 workbook, inputs.workbook_path, caller, caller_path
             )
@@ -662,7 +688,16 @@ def run_property_stage_two(caller: Any) -> Path:
                         cleanup_error,
                     )
             restore_error: Exception | None = None
-            if save_attempted and not model_saved and backup_path is not None:
+            # Restore on any failure that left the Stage 1 file changed on disk,
+            # not only after our own save, so stray writes never persist.
+            if (
+                not model_saved
+                and backup_path is not None
+                and (
+                    save_attempted
+                    or _file_changed_since(inputs.workbook_path, before_mtime)
+                )
+            ):
                 try:
                     shutil.copy2(backup_path, inputs.workbook_path)
                     if shared._file_hash(backup_path) != shared._file_hash(
@@ -682,7 +717,7 @@ def run_property_stage_two(caller: Any) -> Path:
             if restore_error is not None:
                 raise PropertyStageTwoError(
                     "Property Stage 2 could not restore the Stage 1 workbook "
-                    f"after failed save verification: {restore_error}"
+                    f"after the run failed: {restore_error}"
                 ) from restore_error
 
 

@@ -370,6 +370,8 @@ def _run_harness(
     advance_mtime: bool = True,
     local_run: bool = True,
     data_source: str = "SQLserver",
+    autosave_can_be_disabled: bool = True,
+    macro_overwrites_workbook: bool = False,
 ) -> tuple[Any, list[tuple[Any, ...]], list[dict[str, object]], Any, Path]:
     """Run Stage 2 through fake Excel while recording every external action."""
     stage_two = _stage_two()
@@ -396,7 +398,21 @@ def _run_harness(
             "prm_DataSource": _name(data_source),
         }
     )
-    workbook.api = SimpleNamespace(
+    class FakeWorkbookApi(SimpleNamespace):
+        # OneDrive/SharePoint workbooks open with AutoSave on.
+        _autosave = True
+
+        @property
+        def AutoSaveOn(self) -> bool:  # noqa: N802 - Excel COM name
+            return self._autosave
+
+        @AutoSaveOn.setter
+        def AutoSaveOn(self, value: bool) -> None:  # noqa: N802 - Excel COM name
+            events.append(("autosave", value))
+            if autosave_can_be_disabled:
+                self._autosave = value
+
+    workbook.api = FakeWorkbookApi(
         ReadOnly=False,
         Saved=False,
         Close=lambda **kwargs: events.append(("close_workbook", kwargs)),
@@ -405,6 +421,16 @@ def _run_harness(
     def macro(name: str) -> Any:
         def invoke(argument: str) -> None:
             events.append(("macro", name, argument))
+            events.append(("autosave_during_macro", workbook.api.AutoSaveOn))
+            if macro_overwrites_workbook:
+                target.write_bytes(b"partial autosaved output")
+                os.utime(
+                    target,
+                    ns=(
+                        target.stat().st_atime_ns,
+                        original_mtime + 2_000_000_000,
+                    ),
+                )
             if macro_error is not None:
                 raise macro_error
             if not complete_run:
@@ -564,6 +590,52 @@ def test_run_macro_failure_closes_without_saving_and_retains_last_success(
     ]
     assert audits[-1]["status"] == "Failed"
     assert audits[-1]["last_successful_run"] == datetime(2026, 10, 1)
+    assert target.read_bytes() == b"prepared workbook"
+
+
+def test_run_turns_off_autosave_before_the_macro_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage_two, events, _audits, caller, _target = _run_harness(tmp_path, monkeypatch)
+
+    stage_two.run_property_stage_two(caller)
+
+    assert ("autosave", False) in events
+    assert ("autosave_during_macro", False) in events
+    assert events.index(("autosave", False)) < events.index(("recalculate",))
+
+
+def test_run_fails_before_the_macro_when_autosave_stays_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage_two, events, audits, caller, target = _run_harness(
+        tmp_path, monkeypatch, autosave_can_be_disabled=False
+    )
+
+    with pytest.raises(BondsLiteError, match="AutoSave"):
+        stage_two.run_property_stage_two(caller)
+
+    assert not any(event[0] == "macro" for event in events)
+    assert not any(event[0] == "save" for event in events)
+    assert audits[-1]["status"] == "Failed"
+    assert target.read_bytes() == b"prepared workbook"
+
+
+def test_run_restores_stage_one_workbook_changed_on_disk_by_a_failed_macro(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage_two, events, audits, caller, target = _run_harness(
+        tmp_path,
+        monkeypatch,
+        macro_error=RuntimeError("VBA failed"),
+        macro_overwrites_workbook=True,
+    )
+
+    with pytest.raises(BondsLiteError, match="CallRunFrozenPython failed"):
+        stage_two.run_property_stage_two(caller)
+
+    assert not any(event[0] == "save" for event in events)
+    assert audits[-1]["status"] == "Failed"
     assert target.read_bytes() == b"prepared workbook"
 
 
