@@ -489,6 +489,94 @@ Stage 3 keeps earlier token-named `MACalc input_*` workbooks in `Credit`. MACalc
 | `MACalc environment preflight failed` | Check that `BONDS_LITE_MODEL_PYTHON` is valid and that the configured MACalc Batch directory contains importable model modules. Set `SST_MACALC_DIR` if the default folder is not correct. |
 | `MACalc Batch exited with code 1` | Read the traceback in the console. The automatic backup contains the workbook as it was immediately before this attempt. |
 
+## Property Stage 1 - Prepare LTM Flash
+
+Property Stage 1 prepares the LTM Flash workbook for the Property stress
+workstream. It uses the template named by `SST_LTMFlash_input_template`, copies
+the Draft's `I. ScenFlipper` values into the existing template sheet, and sets
+the template's `ValDate` to the Draft's `I_Valuation_Date`. The sheet is
+overwritten in place so formulas and names in the LTM Flash workbook continue
+to refer to the same sheet.
+
+The named Draft flag `SST_Property_standalone` controls this workflow. The
+installer names `I. Control!D18` only when `I. Control!C18` is labelled
+`Property Value`; an existing valid name is preserved. If the flag is FALSE,
+the stage records a failed attempt and retains the previous successful output.
+
+The output is saved in `SST Output_<suffix>\Property` beside the Draft as
+`<template stem>_<suffix>.<extension>`. A rerun with the same suffix replaces
+only the `Property` folder; the existing `Credit` folder is preserved and the
+previous Property output is restored if the attempt fails. The stage does not
+recalculate LTM Flash or update its external links. The later LTM run is
+responsible for calculation.
+
+### Source-mode installation and run
+
+Close the Draft in Excel and install the new audit panel and button from the
+project folder:
+
+```powershell
+python -m bonds_lite_input --install-property-stage-one "Draft Input spreadsheet for SST.xlsm"
+```
+
+The installer creates a timestamped backup under `references\backups`. As
+with other workbook installers, Excel must permit programmatic access to the
+VBA project. The installed **Prepare LTM Flash** button invokes Property
+Stage 1 through the source-mode controller. It shares the Draft run guard with
+the Credit stages, so only one stress stage can run at a time.
+
+The `P1` command token is available to the source controller. The currently
+deployed packaged release does not include Property Stage 1; do not install
+the Property button into a packaged Draft until a separate packaged release
+has been built, tested and approved.
+
+## Property Stage 2 - Run LTM Flash
+
+Property Stage 2 requires the Property flag to be Excel TRUE and the Stage 1
+audit to say `Succeeded`. It uses only the workbook recorded in
+`SST_PropStage1_LastSuccessfulOutput`; it does not select a newer file from the
+Property output folder. The Stage 1 workbook must be a non-empty `.xlsb` or
+`.xlsm` file, and the LTM model executable referenced by its macro must be
+available.
+
+Close the Draft in Excel and install the Stage 2 audit panel and button from
+the project folder:
+
+```powershell
+python -m bonds_lite_input --install-property-stage-two "Draft Input spreadsheet for SST.xlsm"
+```
+
+The installer creates a timestamped Draft backup under `references\backups`.
+It places the `Run LTM Flash` button and audit panel below the current Property
+Stage 1 controls, preserves controls that have been moved or resized, and
+rejects partial named installations or occupied cells/shapes. Excel must allow
+programmatic access to the VBA project.
+
+The Stage 2 button opens the handed-off LTM workbook in a second, visible Excel
+instance. It does not update external links. After a full recalculation, it
+calls the existing `CallRunFrozenPython("flipper")` macro directly, without
+opening the macro button's option prompt. The model updates the same workbook;
+Stage 2 creates no additional output workbook or folder. Keep the second Excel
+instance visible and attend to any Excel or VBA error dialog. There is no
+automated timeout or process termination.
+
+Stage 2 saves in place only after confirming fresh `RunStartTime` and
+`RunEndTime` values, completion markers for every scenario, the final
+`End of multirun!` progress message, and non-blank output on `O. CFOutput`,
+`O. PVOutput` and `O. ConcRisk`. It then confirms Excel reports the workbook
+saved and its modification time advanced. If a run or check fails before that
+commit, the Stage 1 workbook is closed without saving. If post-save
+verification fails, the original workbook is restored from a temporary
+pre-run copy. A successfully verified LTM workbook is retained if only the
+final Draft audit save fails; the audit reports the distinct workbook and
+Draft states and retains the previous `Last Successful Run`.
+
+The LTM macro normally clears `O. NoteVal` and the `O. NoteValRebase` table.
+Stage 2 does not snapshot, restore, validate or populate these areas. The
+`P2` source-controller token is available, but the currently deployed
+packaged release does not include Property Stage 2. A real LTM run, live Draft
+installation, and combined package promotion require separate user approval.
+
 ## Glossary
 
 - Caller: the open Draft workbook whose button was clicked.

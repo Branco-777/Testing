@@ -681,7 +681,9 @@ def test_main_logs_stage_one_cancellation_without_output(
 ) -> None:
     import bonds_lite_input as workflow
 
-    caller = SimpleNamespace(fullname="Draft.xlsm", api=SimpleNamespace(FullName="Draft.xlsm"))
+    caller = SimpleNamespace(
+        fullname="Draft.xlsm", api=SimpleNamespace(FullName="Draft.xlsm")
+    )
     app = SimpleNamespace(api=SimpleNamespace(Hwnd=1234), books=[caller])
     monkeypatch.setitem(sys.modules, "xlwings", SimpleNamespace(apps=[app]))
     monkeypatch.setattr(sys, "argv", [
@@ -1755,13 +1757,17 @@ def test_packaged_builder_publishes_versioned_central_copy_source(
     assert (release_root / "current.txt").read_bytes() == b"test-local-cache-source"
 
 
-def test_pyinstaller_command_hidden_imports_stages_three_and_four_in_controller_only(
+def test_pyinstaller_command_hidden_imports_controller_stages_only(
     tmp_path: Path,
 ) -> None:
-    from tools import build_packaged_stages as builder
+    import runpy
+
+    builder = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "tools" / "build_packaged_stages.py")
+    )
 
     def hidden_imports(model: Path | None) -> set[str]:
-        command = builder.pyinstaller_command(
+        command = builder["pyinstaller_command"](
             Path("python.exe"), Path("entry.py"), "App", tmp_path / "dist",
             tmp_path / "work", tmp_path / "spec", tmp_path, model=model,
         )
@@ -1773,8 +1779,12 @@ def test_pyinstaller_command_hidden_imports_stages_three_and_four_in_controller_
 
     assert "sst_stage_three" in hidden_imports(None)
     assert "sst_stage_four" in hidden_imports(None)
+    assert "sst_property_stage_one" in hidden_imports(None)
+    assert "sst_property_stage_two" in hidden_imports(None)
     assert "sst_stage_three" not in hidden_imports(tmp_path / "model")
     assert "sst_stage_four" not in hidden_imports(tmp_path / "model")
+    assert "sst_property_stage_one" not in hidden_imports(tmp_path / "model")
+    assert "sst_property_stage_two" not in hidden_imports(tmp_path / "model")
 
 
 def test_packaged_builder_adds_macalc_model_application_and_pulp_runtime(
@@ -7233,6 +7243,181 @@ def test_main_stage_dispatch_keeps_default_one_and_treats_stage_two_cancellation
     assert all(reporter.joined for reporter in reporting_threads)
 
 
+def test_main_stage_p1_dispatches_to_property_stage_one(
+    monkeypatch: pytest.MonkeyPatch,
+    console_logger: logging.Logger,
+    reporting_threads: list[Any],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import bonds_lite_input as workflow
+
+    caller = SimpleNamespace(fullname="Draft.xlsm", api=SimpleNamespace(FullName="Draft.xlsm"))
+    app = SimpleNamespace(api=SimpleNamespace(Hwnd=1234), books=[caller])
+    output = Path("SST Output_Test/Property/LTM_FlashModel_Test.xlsb")
+    received: list[Any] = []
+
+    def run_property_stage_one(book: Any) -> Path:
+        assert book is caller
+        received.append(book)
+        return output
+
+    monkeypatch.setitem(sys.modules, "xlwings", SimpleNamespace(apps=[app]))
+    monkeypatch.setitem(
+        sys.modules,
+        "sst_property_stage_one",
+        SimpleNamespace(run_property_stage_one=run_property_stage_one),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "bonds_lite_input",
+            "--caller",
+            "Draft.xlsm",
+            "--excel-hwnd",
+            "1234",
+            "--stage",
+            "P1",
+        ],
+    )
+    monkeypatch.setattr(
+        "builtins.input", lambda *args: pytest.fail("No implicit pause")
+    )
+
+    assert workflow.main() == 0
+
+    assert received == [caller]
+    console = capsys.readouterr().out
+    assert "Property Stage 1" in console
+    assert str(output) in console
+    assert all(reporter.joined for reporter in reporting_threads)
+
+
+def test_main_stage_p2_dispatches_only_to_property_stage_two(
+    monkeypatch: pytest.MonkeyPatch,
+    console_logger: logging.Logger,
+    reporting_threads: list[Any],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import bonds_lite_input as workflow
+
+    caller = SimpleNamespace(
+        fullname="Draft.xlsm", api=SimpleNamespace(FullName="Draft.xlsm")
+    )
+    app = SimpleNamespace(api=SimpleNamespace(Hwnd=1234), books=[caller])
+    output = Path("SST Output_Test/Property/LTM_FlashModel_Test.xlsb")
+    received: list[Any] = []
+
+    def run_property_stage_two(book: Any) -> Path:
+        assert book is caller
+        received.append(book)
+        return output
+
+    monkeypatch.setitem(sys.modules, "xlwings", SimpleNamespace(apps=[app]))
+    monkeypatch.setitem(
+        sys.modules,
+        "sst_property_stage_two",
+        SimpleNamespace(run_property_stage_two=run_property_stage_two),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "bonds_lite_input",
+            "--caller",
+            "Draft.xlsm",
+            "--excel-hwnd",
+            "1234",
+            "--stage",
+            "P2",
+        ],
+    )
+    monkeypatch.setattr(
+        "builtins.input", lambda *args: pytest.fail("No implicit pause")
+    )
+
+    assert workflow.main() == 0
+
+    assert received == [caller]
+    console = capsys.readouterr().out
+    assert "Property Stage 2" in console
+    assert "updated LTM Flash in place" in console
+    assert str(output) in console
+    assert all(reporter.joined for reporter in reporting_threads)
+
+
+def test_main_installs_property_stage_one_controls_from_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bonds_lite_input as workflow
+
+    backup = Path("Draft_backup.xlsm")
+    received: list[Path] = []
+    messages: list[str] = []
+
+    def install(caller: Path) -> Path:
+        received.append(caller)
+        return backup
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sst_property_stage_one",
+        SimpleNamespace(install_property_stage_one_controls=install),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["bonds_lite_input", "--install-property-stage-one", "Draft.xlsm"],
+    )
+    monkeypatch.setattr(
+        workflow.logger,
+        "info",
+        lambda message, *args: messages.append(str(message)),
+    )
+
+    assert workflow.main() == 0
+
+    assert received == [Path("Draft.xlsm")]
+    assert any("Property Stage 1 controls installed" in message for message in messages)
+    assert any(str(backup) in message for message in messages)
+
+
+def test_main_installs_property_stage_two_controls_from_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bonds_lite_input as workflow
+
+    backup = Path("Draft_backup.xlsm")
+    received: list[Path] = []
+    messages: list[str] = []
+
+    def install(caller: Path) -> Path:
+        received.append(caller)
+        return backup
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sst_property_stage_two",
+        SimpleNamespace(install_property_stage_two_controls=install),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["bonds_lite_input", "--install-property-stage-two", "Draft.xlsm"],
+    )
+    monkeypatch.setattr(
+        workflow.logger,
+        "info",
+        lambda message, *args: messages.append(str(message)),
+    )
+
+    assert workflow.main() == 0
+
+    assert received == [Path("Draft.xlsm")]
+    assert any("Property Stage 2 controls installed" in message for message in messages)
+    assert any(str(backup) in message for message in messages)
+
+
 @pytest.mark.parametrize("stage", [None, "1", "2", "3", "4"])
 @pytest.mark.parametrize("outcome", ["success", "failure", "interrupted"])
 def test_main_console_messages_identify_the_selected_stage(
@@ -7418,6 +7603,25 @@ def test_stage_four_launcher_adds_run_macalc_without_changing_earlier_stage_macr
         assert re.search(
             r"(?is)Public Sub PrepareMACalc\(\).*?LaunchBondsLite 3", launcher
         )
+
+
+def test_property_stage_launcher_uses_string_stage_token_in_both_launchers() -> None:
+    import bonds_lite_input as workflow
+
+    for launcher in (workflow.VBA_LAUNCHER, workflow.PACKAGED_VBA_LAUNCHER):
+        assert re.search(
+            r'(?is)Public Sub PrepareLTMFlash\(\).*?LaunchBondsLite "P1"',
+            launcher,
+        )
+        assert re.search(
+            r'(?is)Public Sub RunLTMFlash\(\).*?LaunchBondsLite "P2"',
+            launcher,
+        )
+        assert re.search(
+            r"(?i)Private Sub LaunchBondsLite\(ByVal stage As String\)",
+            launcher,
+        )
+
 
 
 @pytest.fixture
@@ -8127,6 +8331,22 @@ def test_packaged_model_entry_preflight_imports_runtime_without_batch(
         (["--caller", "Draft.xlsm", "--stage", "2"], "Starting Stage 2..."),
         (["--caller", "Draft.xlsm", "--stage", "3"], "Starting Stage 3..."),
         (["--caller", "Draft.xlsm", "--stage", "4"], "Starting Stage 4..."),
+        (
+            ["--caller", "Draft.xlsm", "--stage", "P1"],
+            "Starting Property Stage 1...",
+        ),
+        (
+            ["--caller", "Draft.xlsm", "--stage", "P2"],
+            "Starting Property Stage 2...",
+        ),
+        (
+            ["--install-property-stage-one", "Draft.xlsm"],
+            "Starting Bonds Lite controller...",
+        ),
+        (
+            ["--install-property-stage-two", "Draft.xlsm"],
+            "Starting Bonds Lite controller...",
+        ),
         (["--caller", "Draft.xlsm", "--stage=4"], "Starting Stage 4..."),
         (["--self-test"], "Starting Bonds Lite controller..."),
         (
@@ -8826,6 +9046,25 @@ def test_read_stress_flags_accepts_excel_booleans() -> None:
     assert workflow.read_stress_flags(book) == {DG_FLAG: True, SPREAD_FLAG: False}
 
 
+def test_property_flag_does_not_join_or_enable_credit_stress_registry() -> None:
+    import bonds_lite_input as workflow
+
+    property_flag = "SST_Property_standalone"
+    book = _named_control_book(
+        {
+            DG_FLAG: False,
+            SPREAD_FLAG: False,
+            property_flag: True,
+        }
+    )
+
+    assert "Property" not in workflow.STRESS_OUTPUT_FOLDERS
+    credit_flags = workflow.read_stress_flags(book)
+    assert credit_flags == {DG_FLAG: False, SPREAD_FLAG: False}
+    with pytest.raises(BondsLiteError, match="No stress run is selected"):
+        workflow.validate_stress_selection(credit_flags, {})
+
+
 @pytest.mark.parametrize("value", ["TRUE", 1, 0, 1.0, None, ""], ids=repr)
 @pytest.mark.parametrize("name", [DG_FLAG, SPREAD_FLAG])
 def test_read_stress_flags_rejects_non_boolean_values(name: str, value: Any) -> None:
@@ -8885,6 +9124,67 @@ def test_allocate_stress_folder_creates_root_and_stress_folder(tmp_path: Path) -
     assert folder == tmp_path / "SST Output_a" / "Credit"
     assert folder.is_dir() and list(folder.iterdir()) == []
     assert root_created is True and backup is None
+
+
+def test_allocate_stress_folder_creates_property_beside_credit(
+    tmp_path: Path,
+) -> None:
+    import bonds_lite_input as workflow
+
+    credit = tmp_path / "SST Output_a" / "Credit"
+    credit.mkdir(parents=True)
+    (credit / "credit-sentinel.txt").write_bytes(b"Keep Credit")
+
+    folder, root_created, backup = workflow.allocate_stress_folder(
+        tmp_path, "a", "Property"
+    )
+
+    assert folder == tmp_path / "SST Output_a" / "Property"
+    assert folder.is_dir() and list(folder.iterdir()) == []
+    assert root_created is False and backup is None
+    assert (credit / "credit-sentinel.txt").read_bytes() == b"Keep Credit"
+
+
+def test_allocate_stress_folder_replaces_property_without_changing_credit(
+    tmp_path: Path,
+) -> None:
+    import bonds_lite_input as workflow
+
+    credit = tmp_path / "SST Output_a" / "Credit"
+    credit.mkdir(parents=True)
+    (credit / "credit-sentinel.txt").write_bytes(b"Keep Credit")
+    property_folder = tmp_path / "SST Output_a" / "Property"
+    property_folder.mkdir()
+    (property_folder / "previous-output.xlsb").write_bytes(b"Previous Property")
+    previous_tree = _file_tree(property_folder)
+
+    folder, root_created, backup = workflow.allocate_stress_folder(
+        tmp_path, "a", "Property"
+    )
+
+    assert folder == property_folder and folder.is_dir() and not list(folder.iterdir())
+    assert root_created is False
+    assert backup is not None and _file_tree(backup) == previous_tree
+    assert (credit / "credit-sentinel.txt").read_bytes() == b"Keep Credit"
+
+
+def test_allocate_stress_folder_restores_property_after_failed_run(
+    tmp_path: Path,
+) -> None:
+    import bonds_lite_input as workflow
+
+    previous = tmp_path / "SST Output_a" / "Property"
+    previous.mkdir(parents=True)
+    (previous / "previous-output.xlsb").write_bytes(b"Keep")
+
+    folder, root_created, backup = workflow.allocate_stress_folder(
+        tmp_path, "a", "Property"
+    )
+    (folder / "partial-output.xlsb").write_bytes(b"Remove")
+    workflow.remove_incomplete_stress_folder(folder, root_created, backup)
+
+    assert (previous / "previous-output.xlsb").read_bytes() == b"Keep"
+    assert not (previous / "partial-output.xlsb").exists()
 
 
 def test_allocate_stress_folder_reuses_existing_root(tmp_path: Path) -> None:

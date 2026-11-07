@@ -11,11 +11,15 @@ def _startup_message(arguments: list[str]) -> str:
     """Identify the requested stage before importing the workflow."""
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--caller")
-    parser.add_argument("--stage", choices=("1", "2", "3", "4"), default="1")
+    parser.add_argument(
+        "--stage", choices=("1", "2", "3", "4", "P1", "P2"), default="1"
+    )
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--install-button")
     parser.add_argument("--install-stage-three")
     parser.add_argument("--install-stage-four")
+    parser.add_argument("--install-property-stage-one")
+    parser.add_argument("--install-property-stage-two")
     parser.add_argument("-h", "--help", action="store_true")
     options, _ = parser.parse_known_args(arguments)
     if not options.caller or any(
@@ -24,10 +28,16 @@ def _startup_message(arguments: list[str]) -> str:
             options.install_button,
             options.install_stage_three,
             options.install_stage_four,
+            options.install_property_stage_one,
+            options.install_property_stage_two,
             options.help,
         )
     ):
         return "Starting Bonds Lite controller..."
+    if options.stage == "P1":
+        return "Starting Property Stage 1..."
+    if options.stage == "P2":
+        return "Starting Property Stage 2..."
     return f"Starting Stage {options.stage}..."
 
 

@@ -803,3 +803,91 @@ The packaged controller and a new packaged MACalc model app are built, and the r
 - Keep the generic opening message and the raw command at INFO. Rejected because the user wanted to identify the stage and avoid technical argument text in normal output.
 - Remove the command diagnostic entirely. Rejected because it remains useful when DEBUG logging is enabled during troubleshooting.
 **Rationale:** Make the console clearer without losing early startup feedback or useful diagnostic information.
+
+## Property Stress Decisions (Property Stage 1 - Prepare LTM Flash)
+
+### Decision 87: Property Workstream In Its Own Module (2026-11-06)
+**Question:** Where should Property stress code live?
+**Decided by:** User, 6 November 2026.
+**Choice:** All Property stages go in new modules (`src/sst_property_stage_one.py`, later stages likewise); they reuse the generic Excel I/O, folder, guard and audit helpers in `bonds_lite_input.py`. Output goes to `SST Output_<suffix>\Property`, beside `Credit` (one folder per stress). The button and audit panel follow the Credit stages' pattern, Property Stage 1 to the right of the Credit Stage 1 panel and later Property stages below it.
+**Alternatives considered:** Extending `bonds_lite_input.py` or the Credit stage modules. Rejected by the user to keep each stress separate.
+**Rationale:** The user's request.
+
+### Decision 88: Replace ScenFlipper Contents In Place, With Guards (2026-11-06)
+**Question:** How should the template's `I. ScenFlipper` be "replaced" by the Draft's?
+**Decided by:** Agent; approved by the user, 6 November 2026 (QP-2, QP-3).
+**Choice:** Keep the template's sheet object. Clear the union of both used ranges, copy the Draft's used range to the same address (contents, formats, validation, column widths), and verify exact equality. Guards: sheet in both books; identical non-blank unique row-5 headers; `B2` = number of scenario rows; `B3` in `1..B2`; `B1` in `detailed/GrossandNNEG/total`; no error values; no formula referring to another sheet or workbook. Verify that `prm_*` names, formulae that reference the sheet (for example `I. Inputs!C1`) and `LinkSources` are unchanged.
+**Alternatives considered:** Delete the sheet and `Copy After` the Draft's (rejected: `I. Inputs` formulae such as `OFFSET('I. ScenFlipper'!$B$5,...)` become `#REF!`); copy values only (rejected: loses the B1 list validation and formats).
+**Rationale:** Gives the Draft's tab content exactly, without breaking the model's references.
+
+### Decision 89: Set The LTM Flash Valuation Date From The Draft (2026-11-06)
+**Question:** How should LTM Flash's valuation date be kept in line with the Draft?
+**Decided by:** Agent; approved by the user, 6 November 2026 (QP-1).
+**Choice:** Write the Draft's `I_Valuation_Date` (`I. Control!D11`) into the template's `ValDate` (`I. Control!D12`), logging the old and new dates, and read it back. Both must be Excel dates.
+**Alternatives considered:** Check only and stop when different (safer if the template's date must be set up with other date-dependent inputs; not chosen because Credit Stage 1 also writes the Draft date into its template, Decision 6).
+**Rationale:** Consistent with Credit Stage 1.
+
+### Decision 90: No Recalculation Or Link Update In Property Stage 1 (2026-11-06)
+**Question:** Should Stage 1 recalculate LTM Flash after the changes?
+**Decided by:** Agent; approved by the user, 6 November 2026 (QP-4).
+**Choice:** Open with `update_links=False`, manual calculation and `CalculateBeforeSave` off; save without recalculation. The LTM run stage recalculates.
+**Alternatives considered:** Full recalculation (needs the JRC add-in and `\\server090` links; could save `#NAME?` or stale-link errors into the output).
+**Rationale:** Stage 1 only prepares inputs; recalculation belongs with the model run.
+
+### Decision 91: Property Stage 1 Output Filename (2026-11-06)
+**Question:** What should the saved LTM Flash be called?
+**Decided by:** Agent; approved by the user, 6 November 2026 (QP-5, QP-7).
+**Choice:** `<template stem>_<suffix><template extension>`, e.g. `LTM_FlashModel_v3.2a_Test.xlsb`, built in a staging folder inside `Property` and renamed on success. A rerun with the same suffix replaces `Property` (Decision 59 safe-replace), leaving `Credit` untouched.
+**Alternatives considered:** The template's own name (no run identity); `LTM Flash_<suffix>.xlsb` (loses the model version).
+**Rationale:** Keeps both the model version and the run identity.
+
+### Decision 92: Property Value Flag Gates The Property Workstream (2026-11-06)
+**Question:** Should `I. Control!D18` ("Property Value") control Property Stage 1?
+**Decided by:** User, 6 November 2026 (QP-6; the agent had proposed no gate).
+**Choice:** Yes, as the two Credit flags gate the Credit workstream (Decisions 55 and 58). The installer names D18 `SST_Property_standalone` after checking that C18 reads `Property Value`, the same way `initialise_stage_path_names` names labelled controls. If the name already exists it is kept, so the user can move the control. Each Property stage reads the flag at the start and requires an Excel TRUE/FALSE. If the flag is FALSE or not TRUE/FALSE, the stage stops with a clear message before creating or replacing `Property`. As in Credit Stage 1, the run is recorded as `Failed` and the previous output is kept. Property gets its own flag constant and check in `sst_property_stage_one.py` and is not added to `STRESS_OUTPUT_FOLDERS`; `allocate_stress_folder` gets a separate allow-list entry for `Property`.
+**Alternatives considered:** No gate (the agent's proposal; rejected by the user). Adding `Property` to `STRESS_OUTPUT_FOLDERS` (rejected: Credit Stage 1's "at least one flag TRUE" check would then pass with only Property TRUE, and Credit Stages 1 and 4 would need the Property name).
+**Rationale:** The user wants one Draft flag per stress to decide whether that stress runs, without the Credit and Property checks affecting each other.
+
+### Decision 93: Property Stage 1 Names And Launcher (2026-11-06)
+**Question:** Which identifiers should the Property Stage 1 button use?
+**Decided by:** Agent; approved by the user, 6 November 2026 (QP-8).
+**Choice:** CLI `--stage P1` and `--install-property-stage-one`; VBA `PrepareLTMFlash` -> `LaunchBondsLite "P1"`, with `LaunchBondsLite` changed to `ByVal stage As String`; button `btnPrepareLTMFlash` ("Prepare LTM Flash"); panel `SST_PropStage1_Panel` ("Property Stage 1 - Prepare LTM Flash"); fields `SST_PropStage1_{LastRun, Start, Finish, Elapsed, User, Status, InputTemplate, LastSuccessfulOutput}`.
+**Alternatives considered:** Numeric stage 5 (implies it follows Credit Stage 4); a second VBA launcher sub (duplicates launcher code).
+**Rationale:** Workstream-prefixed IDs scale to later stresses (P2, ...).
+
+### Decision 94: Share The Draft Run Guard Across Stresses (2026-11-06)
+**Question:** Can a Property stage run while a Credit stage is running?
+**Decided by:** Agent; approved by the user, 6 November 2026 (QP-9).
+**Choice:** No; reuse `workbook_run_guard` on the Draft.
+**Alternatives considered:** A Property-only mutex (both stages save the Draft's audit cells, which risks conflicting saves).
+**Rationale:** One writer to the Draft at a time.
+
+### Decision 95: Place Property Stage 1 To The Right Of Credit Stage 1 (2026-11-06)
+**Question:** Where exactly should the button and panel go?
+**Decided by:** User (position); agent (geometry), approved by the user, 6 November 2026.
+**Choice:** At install, from `SST_Stage1_Panel` (O9:V19): one gap column, then a button the size of `btnGenerateBondsLiteInput` at the same relative row, then an 11 x 8 panel at the same top row; today X13:AB15 and AC9:AJ19. The same occupancy, merge and overlap checks as Stage 3/4 apply. Later Property stages go below.
+**Alternatives considered:** Panel directly right of the Credit panel with the button below it (breaks the button-then-panel arrangement the user set up).
+**Rationale:** Mirrors the user's Credit column, so each stress is one column of buttons and panels.
+
+## Agent-made decisions pending user approval
+
+### Decision 96: Proceed Without Unavailable Team-Specific Skills (2026-11-06)
+**Question:** Which team-specific conventions should apply when the repository team memory and `.github/supir-agents.lock` are both missing, and the question tool is unavailable?
+**Decided by:** Agent (pending user approval).
+**Choice:** Proceed with no team-specific skills for this implementation, record `none` in the repository team memory, and follow the approved plan and shared Just skills.
+**Alternatives considered:** Infer a team from the business domain (unsupported by repository evidence); block implementation until the user can be asked (unnecessary for executing the already-approved plan).
+**Rationale:** No declared team information is available, so applying team-specific rules would be speculative. The choice is recorded for the user to confirm or override.
+
+### Decision 97: Property Stage 2 Runs LTM Flash In Place (2026-11-07)
+**Question:** What should Property Stage 2 execute, how should it manage the LTM workbook, and what should count as success?
+**Decided by:** User, 7 November 2026.
+**Choice:** Stage 2 reads the latest successful Stage 1 workbook handoff and requires the Property flag to be TRUE and Stage 1 status to be Succeeded. It opens that workbook in a separate visible Excel instance, recalculates without updating external links, and calls the existing LTM macro `CallRunFrozenPython "flipper"` directly, without clicking the multi-run button or recreating its option prompt. The model updates the same workbook; Stage 2 creates no output workbook or folder. It saves in place only after fresh run timestamps, all `Run N - End of run!` markers through `prm_NoOfScens`, the terminal `End of multirun!` message, and non-empty `O. CFOutput`, `O. PVOutput`, and `O. ConcRisk` are verified. It also verifies `Workbook.Saved` and a changed file modification time. Row-1 run-number validation is deferred. There is no timeout. The macro is allowed to clear its usual `O. NoteVal` and `O. NoteValRebase` areas. Add a Stage 2 button and panel below Property Stage 1 using the Credit Stage 2 placement pattern. Use CLI `P2`, Draft macro `RunLTMFlash`, button `btnRunLTMFlash`, panel `SST_PropStage2_Panel`, and fields `SST_PropStage2_{LastRun, Start, Finish, Elapsed, User, Status, InputWorkbook, LastSuccessfulRun}`. `LastSuccessfulRun` is a timestamp retained after failures. No team-specific conventions apply.
+**Alternatives considered:**
+- Recreate the button's 0/1/2 prompt or click its event procedure — rejected because the user asked to run the macro path for option 2 directly.
+- Run in the Draft's Excel instance — rejected; a separate visible Excel instance keeps the Draft usable and gives the LTM process its own workbook context.
+- Update external links or run without recalculation — rejected; recalculate with links disabled as confirmed by the user.
+- Save after every macro return or on partial results — rejected; save only after the agreed completion and output checks.
+- Add a timeout or process kill — rejected; user chose no time limit, and the macro can display an interactive Excel error dialog.
+- Preserve or restore the NoteVal ranges/table — rejected; the user explicitly allows the macro to clear them for now.
+- Add row-1 run-number checks — deferred by the user.
+**Rationale:** The existing macro is the supported LTM execution path and writes results into the Stage 1 workbook. The checks compensate for its lack of a reliable success return, while failure-without-save preserves the committed Stage 1 file.

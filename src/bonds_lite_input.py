@@ -825,6 +825,7 @@ CREDIT_DG_FLAG = "SST_Credit_DG_standalone"
 CREDIT_SPREAD_FLAG = "SST_Credit_spread_standalone"
 # Each stress output folder is created when any of its Draft flags is TRUE.
 STRESS_OUTPUT_FOLDERS = {"Credit": (CREDIT_DG_FLAG, CREDIT_SPREAD_FLAG)}
+PROPERTY_OUTPUT_FOLDER = "Property"
 OUTPUT_SUFFIX_NAME = "SST_output_folder_suffix"
 OUTPUT_ROOT_PREFIX = "SST Output_"
 
@@ -901,11 +902,19 @@ Public Sub PrepareMACalc()
     LaunchBondsLite 3
 End Sub
 
+Public Sub PrepareLTMFlash()
+    LaunchBondsLite "P1"
+End Sub
+
+Public Sub RunLTMFlash()
+    LaunchBondsLite "P2"
+End Sub
+
 Public Sub RunMACalc()
     LaunchBondsLite 4
 End Sub
 
-Private Sub LaunchBondsLite(ByVal stage As Long)
+Private Sub LaunchBondsLite(ByVal stage As String)
     On Error GoTo Failed
     Dim shell As Object
     Dim executable As String
@@ -1170,6 +1179,14 @@ Public Sub PrepareMACalc()
     LaunchBondsLite 3
 End Sub
 
+Public Sub PrepareLTMFlash()
+    LaunchBondsLite "P1"
+End Sub
+
+Public Sub RunLTMFlash()
+    LaunchBondsLite "P2"
+End Sub
+
 Public Sub RunMACalc()
     LaunchBondsLite 4
 End Sub
@@ -1181,7 +1198,7 @@ Public Function LocalControllerFullName(ByVal localDraft As String) As String
         CurrentLocalBundle(), "Controller\BondsLiteController.exe")
 End Function
 
-Private Sub LaunchBondsLite(ByVal stage As Long)
+Private Sub LaunchBondsLite(ByVal stage As String)
     On Error GoTo Failed
     Dim shell As Object, filesystem As Object, localDraft As String
     Dim bundle As String, controller As String, command As String
@@ -1434,7 +1451,7 @@ def allocate_stress_folder(
     path of a replaced folder (or None). The caller deletes the backup on
     success or restores it on failure (Decision 59).
     """
-    if folder_name not in STRESS_OUTPUT_FOLDERS:
+    if folder_name not in (*STRESS_OUTPUT_FOLDERS, PROPERTY_OUTPUT_FOLDER):
         raise BondsLiteError(f"Unknown stress output folder: {folder_name}")
     suffix = validate_output_suffix(suffix)
     caller_folder = Path(caller_folder)
@@ -1593,7 +1610,7 @@ def portable_output_path(caller_path: Path, output_path: Path) -> str:
         ".." in path.parts
         or path.is_symlink()
         or path.parent.is_symlink()
-        or path.name not in STRESS_OUTPUT_FOLDERS
+        or path.name not in (*STRESS_OUTPUT_FOLDERS, PROPERTY_OUTPUT_FOLDER)
         or output_root_suffix(path.parent.name) is None
     ):
         raise BondsLiteError(
@@ -2923,11 +2940,15 @@ def main() -> int:
     parser.add_argument("--packaged", action="store_true")
     parser.add_argument("--install-stage-three", type=Path)
     parser.add_argument("--install-stage-four", type=Path)
+    parser.add_argument("--install-property-stage-one", type=Path)
+    parser.add_argument("--install-property-stage-two", type=Path)
     parser.add_argument("--caller")
     parser.add_argument("--caller-local", type=Path)
     parser.add_argument("--excel-hwnd", type=int)
     parser.add_argument("--pause", action="store_true", help="Wait for Enter after a run")
-    parser.add_argument("--stage", choices=("1", "2", "3", "4"), default="1")
+    parser.add_argument(
+        "--stage", choices=("1", "2", "3", "4", "P1", "P2"), default="1"
+    )
     parser.add_argument("--self-test", action="store_true")
     arguments = parser.parse_args()
     if arguments.install_button:
@@ -2946,6 +2967,22 @@ def main() -> int:
         backup = install_stage_four_controls(arguments.install_stage_four)
         logger.info(f"Stage 4 controls installed; original backup: {backup}")
         return 0
+    if arguments.install_property_stage_one:
+        from sst_property_stage_one import install_property_stage_one_controls
+
+        backup = install_property_stage_one_controls(
+            arguments.install_property_stage_one
+        )
+        logger.info(f"Property Stage 1 controls installed; original backup: {backup}")
+        return 0
+    if arguments.install_property_stage_two:
+        from sst_property_stage_two import install_property_stage_two_controls
+
+        backup = install_property_stage_two_controls(
+            arguments.install_property_stage_two
+        )
+        logger.info(f"Property Stage 2 controls installed; original backup: {backup}")
+        return 0
     if arguments.self_test:
         import openpyxl
         import pythoncom
@@ -2962,8 +2999,15 @@ def main() -> int:
     result = 0
     caller_path_token = None
     with run_progress() as progress:
+        stage_name = (
+            "Property Stage 1"
+            if arguments.stage == "P1"
+            else "Property Stage 2"
+            if arguments.stage == "P2"
+            else f"Stage {arguments.stage}"
+        )
         logger.info(
-            f"Stage {arguments.stage} started | timings exclude Python startup "
+            f"{stage_name} started | timings exclude Python startup "
             "and the Enter wait"
         )
         try:
@@ -3006,6 +3050,23 @@ def main() -> int:
                     logger.info("Stage 4 cancelled; no MACalc results were written")
                 else:
                     logger.info(f"Stage 4 succeeded; MACalc results saved:\n{output}")
+            elif arguments.stage == "P1":
+                from sst_property_stage_one import run_property_stage_one
+
+                output = run_property_stage_one(matches[0])
+                if output is None:
+                    logger.info("Property Stage 1 cancelled; no output was written")
+                else:
+                    logger.info(
+                        f"Property Stage 1 succeeded; saved LTM Flash:\n{output}"
+                    )
+            elif arguments.stage == "P2":
+                from sst_property_stage_two import run_property_stage_two
+
+                output = run_property_stage_two(matches[0])
+                logger.info(
+                    f"Property Stage 2 succeeded; updated LTM Flash in place:\n{output}"
+                )
             else:
                 output = run_stage_one(matches[0])
                 if output is None:
@@ -3014,12 +3075,12 @@ def main() -> int:
                     logger.info(f"Saved Bonds Lite inputs in run folder:\n{output}")
         except KeyboardInterrupt:
             logger.error(
-                f"Stage {arguments.stage} interrupted by the user; "
+                f"{stage_name} interrupted by the user; "
                 "managed cleanup has finished"
             )
             result = 1
         except Exception as error:
-            logger.error(f"Stage {arguments.stage} failed: {error}")
+            logger.error(f"{stage_name} failed: {error}")
             result = 1
         finally:
             if caller_path_token is not None:
