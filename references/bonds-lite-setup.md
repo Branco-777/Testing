@@ -42,8 +42,16 @@ existing scenario inputs, templates and output paths as configured; those data
 paths are separate from the application cache. Do not copy application files
 between releases or delete LocalAppData cache folders while a run is active.
 
-**Deployment status:** release `20261107-cache-v18` (built from `2fa2cab`) is
+**Deployment status:** release `20261107-cache-v19` (built from `02c2fa0`) is
 active in the central pointer since 7 November 2026. It fixes Property Stage 2
+failing with "Property Stage 1 output workbook is read-only": the LTM template
+is saved as *read-only recommended*, so Stage 2 now opens the Stage 1 copy with
+that recommendation ignored. Its self-tests passed and its executable hashes
+match `release.json`. To roll back, write `20261107-cache-v18` to the central
+`current.txt`.
+
+Release `20261107-cache-v18` (built from `2fa2cab`) was active earlier on
+7 November 2026. It fixes Property Stage 2
 failing with the xlwings "SharePoint configuration" error when OneDrive holds
 another file with the LTM workbook's name (such as a restored Stage 1 staging
 copy). Stage 2 now maps the workbook's SharePoint URL through the Draft's own
