@@ -42,12 +42,19 @@ existing scenario inputs, templates and output paths as configured; those data
 paths are separate from the application cache. Do not copy application files
 between releases or delete LocalAppData cache folders while a run is active.
 
-**Deployment status:** release `20261107-cache-v17` (Credit Stages 1-4 and
-Property Stages P1/P2, built from `4db7698`) is active in the central pointer
-since 7 November 2026. Its controller, model and MACalc self-tests passed, its
+**Deployment status:** release `20261107-cache-v18` (built from `2fa2cab`) is
+active in the central pointer since 7 November 2026. It fixes Property Stage 2
+failing with the xlwings "SharePoint configuration" error when OneDrive holds
+another file with the LTM workbook's name (such as a restored Stage 1 staging
+copy). Stage 2 now maps the workbook's SharePoint URL through the Draft's own
+folder. Its self-tests passed and its executable hashes match `release.json`.
+To roll back, write `20261107-cache-v17` to the central `current.txt`.
+
+Release `20261107-cache-v17` (Credit Stages 1-4 and
+Property Stages P1/P2, built from `4db7698`) was active from 7 November 2026. Its controller, model and MACalc self-tests passed, its
 executable hashes match `release.json`, and its controller accepts `--stage P1`
-and `--stage P2`. The model and MACalc sources are byte-identical to v16. To roll
-back, write `20261106-cache-v16` to the central `current.txt` (plain ASCII, no
+and `--stage P2`. The model and MACalc sources are byte-identical to v16. Rollback from v17 was to
+`20261106-cache-v16` in the central `current.txt` (plain ASCII, no
 trailing newline).
 
 Release `20261106-cache-v16` (Stages 1-4, built from
