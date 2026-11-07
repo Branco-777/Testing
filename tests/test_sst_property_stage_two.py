@@ -528,6 +528,7 @@ def test_run_uses_separate_visible_excel_and_saves_after_verified_macro(
     assert next(event for event in events if event[0] == "open")[2] == {
         "update_links": False,
         "read_only": False,
+        "ignore_read_only_recommended": True,
     }
     assert [event[1:] for event in events if event[0] == "macro"] == [
         ("Module1.CallRunFrozenPython", "flipper")

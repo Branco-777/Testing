@@ -559,10 +559,12 @@ def run_property_stage_two(caller: Any) -> Path:
             shutil.copy2(inputs.workbook_path, backup_path)
             application = xw.App(visible=True, add_book=False)
             application.api.AutomationSecurity = XL_AUTOMATION_SECURITY_LOW
+            # The LTM template is saved "read-only recommended"; Stage 1 copies inherit it.
             workbook = application.books.open(
                 str(inputs.workbook_path),
                 update_links=False,
                 read_only=False,
+                ignore_read_only_recommended=True,
             )
             _require_expected_workbook(
                 workbook, inputs.workbook_path, caller, caller_path
