@@ -1781,10 +1781,12 @@ def test_pyinstaller_command_hidden_imports_controller_stages_only(
     assert "sst_stage_four" in hidden_imports(None)
     assert "sst_property_stage_one" in hidden_imports(None)
     assert "sst_property_stage_two" in hidden_imports(None)
+    assert "sst_property_stage_two_watchdog" in hidden_imports(None)
     assert "sst_stage_three" not in hidden_imports(tmp_path / "model")
     assert "sst_stage_four" not in hidden_imports(tmp_path / "model")
     assert "sst_property_stage_one" not in hidden_imports(tmp_path / "model")
     assert "sst_property_stage_two" not in hidden_imports(tmp_path / "model")
+    assert "sst_property_stage_two_watchdog" not in hidden_imports(tmp_path / "model")
 
 
 def test_packaged_builder_adds_macalc_model_application_and_pulp_runtime(

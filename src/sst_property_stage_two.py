@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -19,8 +20,28 @@ from urllib.parse import unquote
 
 import bonds_lite_input as shared
 import sst_property_stage_one as stage_one
+from sst_property_stage_two_watchdog import LtmRunWatchdog, configured_time_limit
 
 logger = shared.logger.getChild("sst_property_stage_two")
+
+
+def _log_ltm_watchdog_message(message: str) -> None:
+    """Keep watchdog warnings visible while heartbeats remain informational."""
+    warning_prefixes = (
+        "Abort requested",
+        "Cannot inspect",
+        "Cannot read LTM scenario progress",
+        "LTM progress query",
+        "LTM runner activity is unavailable",
+        "LTM runner was not found",
+        "Potential LTM runner stall",
+        "The LTM runner has exited",
+    )
+    if message.startswith(warning_prefixes):
+        logger.warning(message)
+    else:
+        logger.info(message)
+
 
 STAGE_TWO_PANEL_NAME = "SST_PropStage2_Panel"
 STAGE_TWO_BUTTON_NAME = "btnRunLTMFlash"
@@ -65,13 +86,17 @@ LTM_RUN_START_NAME = "RunStartTime"
 LTM_RUN_END_NAME = "RunEndTime"
 LTM_SCENARIO_COUNT_NAME = "prm_NoOfScens"
 LTM_PROGRESS_FIRST_NAME = "ProgressFirstCell"
-LTM_OUTPUT_SHEETS = ("O. CFOutput", "O. PVOutput", "O. ConcRisk")
+LTM_OUTPUT_SHEETS = ("O. CFOutput", "O. PVOutput")
 XL_UP = -4162
 XL_AUTOMATION_SECURITY_LOW = 1
 
 
 class PropertyStageTwoError(stage_one.PropertyStageOneError):
     """An actionable Property Stage 2 input, Excel run or audit failure."""
+
+
+class PropertyStageTwoTimeoutError(PropertyStageTwoError):
+    """The user chose to abort a Property Stage 2 run at its time limit."""
 
 
 @dataclass(frozen=True)
@@ -557,6 +582,7 @@ def run_property_stage_two(caller: Any) -> Path:
         clock = time.perf_counter()
         workbook_link: str | None = None
         application = workbook = None
+        watchdog: LtmRunWatchdog | None = None
         model_saved = False
         save_attempted = False
         backup_directory: tempfile.TemporaryDirectory[str] | None = None
@@ -604,7 +630,36 @@ def run_property_stage_two(caller: Any) -> Path:
             application.api.CalculateFullRebuild()
             invocation_time = _excel_now(application)
             scenarios = _scenario_count(workbook)
-            _invoke_ltm(workbook, application, invocation_time, scenarios)
+            try:
+                time_limit = configured_time_limit(
+                    scenarios,
+                    override=os.environ.get("SST_P2_TIME_LIMIT_MINUTES"),
+                    frozen=bool(getattr(sys, "frozen", False)),
+                )
+            except ValueError as error:
+                raise PropertyStageTwoError(str(error)) from error
+            watchdog = LtmRunWatchdog(
+                excel_pid=int(application.pid),
+                workbook_name=workbook.name,
+                scenarios=scenarios,
+                logger=_log_ltm_watchdog_message,
+                time_limit=time_limit,
+            )
+            watchdog.start()
+            macro_error: BaseException | None = None
+            try:
+                _invoke_ltm(workbook, application, invocation_time, scenarios)
+            except BaseException as error:
+                macro_error = error
+            finally:
+                watchdog.stop()
+                watchdog.join()
+            if watchdog.aborted:
+                raise PropertyStageTwoTimeoutError(
+                    "Property Stage 2 run timed out and was aborted by the user"
+                ) from macro_error
+            if macro_error is not None:
+                raise macro_error
 
             save_attempted = True
             workbook.save()
@@ -645,7 +700,12 @@ def run_property_stage_two(caller: Any) -> Path:
             )
             return inputs.workbook_path
         except BaseException as error:
-            status = "Interrupted" if isinstance(error, KeyboardInterrupt) else "Failed"
+            if isinstance(error, PropertyStageTwoTimeoutError):
+                status = "Timed Out"
+            elif isinstance(error, KeyboardInterrupt):
+                status = "Interrupted"
+            else:
+                status = "Failed"
             try:
                 _record_failure(
                     caller,
@@ -670,7 +730,10 @@ def run_property_stage_two(caller: Any) -> Path:
                     )
             raise
         finally:
-            if workbook is not None:
+            process_terminated = watchdog is not None and getattr(
+                watchdog, "process_terminated", watchdog.aborted
+            )
+            if workbook is not None and not process_terminated:
                 try:
                     workbook.api.Close(SaveChanges=False)
                 except Exception as cleanup_error:
@@ -678,7 +741,7 @@ def run_property_stage_two(caller: Any) -> Path:
                         "Could not close the owned LTM workbook: %s",
                         cleanup_error,
                     )
-            if application is not None:
+            if application is not None and not process_terminated:
                 try:
                     application.api.DisplayAlerts = False
                     application.quit()

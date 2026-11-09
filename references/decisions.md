@@ -891,3 +891,68 @@ The packaged controller and a new packaged MACalc model app are built, and the r
 - Preserve or restore the NoteVal ranges/table — rejected; the user explicitly allows the macro to clear them for now.
 - Add row-1 run-number checks — deferred by the user.
 **Rationale:** The existing macro is the supported LTM execution path and writes results into the Stage 1 workbook. The checks compensate for its lack of a reliable success return, while failure-without-save preserves the committed Stage 1 file.
+**Superseded by:** Decision 98 removes the unused ConcRisk check; Decision 99 adds the agreed long-run safeguards.
+
+## User-approved decisions
+
+### Decision 98: Stop Validating O. ConcRisk After Property Stage 2 (2026-11-09)
+**Question:** A live Property Stage 2 run failed with "LTM output sheet O. ConcRisk is empty after the run". Should that sheet remain a success check?
+**Decided by:** User, 9 November 2026.
+**Choice:** Remove `O. ConcRisk` from the Stage 2 output checks. `O. CFOutput` and `O. PVOutput` must still be non-blank. `O. ConcRisk` may be empty or absent. This supersedes that part of Decision 97. Released in `20261109-cache-v22`.
+**Alternatives considered:** Keep the check (rejected; the tab is not used, so an empty sheet is not a failure); warn instead of failing (rejected; the user does not need the tab).
+**Rationale:** The check rejected otherwise valid runs on a sheet that has no downstream use.
+
+### Decision 99: Property Stage 2 Long-Run Safeguards (2026-11-09)
+**Question:** What should Property Stage 2 do when an LTM run takes too long or stops progressing?
+**Decided by:** User, 9 November 2026.
+**Choice:** Monitor the run without changing the LTM macro. Print a heartbeat every 5 minutes with elapsed time and scenario progress (`Scenario N of M complete`). Warn after 10 minutes without runner activity. Set the time limit to 10 minutes per scenario (`prm_NoOfScens`), with a 30-minute minimum. At the limit, ask the user in the console whether to keep waiting or abort; never abort without an answer. Aborting closes only the LTM Excel instance owned by Stage 2, never saves, restores the Stage 1 workbook if it changed, and records `Timed Out`. Scope is Property Stage 2 only. This supersedes "There is no timeout" in Decision 97.
+**Alternatives considered:**
+- Fixed 2-hour limit — rejected; a per-scenario limit fits both short and 16-scenario runs (1-2 hours typical, so 160 minutes).
+- Warn only at the limit — rejected; the user wants the option to stop.
+- Abort automatically at the limit — rejected; the macro can show an error dialog that needs the user's attention.
+- Apply the same safeguards to Stage 4 MACalc — deferred by the user.
+**Rationale:** A 16-scenario run normally takes 1-2 hours, so a 160-minute limit does not interrupt normal runs. A prompt keeps the user in control when Excel may be showing a dialog.
+
+## Agent-made decisions pending user approval
+
+### Decision 100: Watch The LTM Runner From Outside Excel (2026-11-09)
+**Question:** How can Stage 2 observe a run while its main thread is blocked in the synchronous `CallRunFrozenPython` COM call?
+**Decided by:** Agent (pending user approval).
+**Choice:** A watcher thread in the controller. It identifies the runner through the process tree under the Excel instance owned by Stage 2: `EXCEL.EXE`, then `cmd.exe /C`, then the `LTMflashArunmanager` executable. Discovery uses the Windows Toolhelp snapshot API, and runner CPU time comes from `pywin32`; no new dependency is added. Activity means the total CPU time of the runner and its descendants increased. If the runner has exited but the macro has not returned after 2 minutes, warn that Excel is probably showing an error dialog. Scenario progress comes from a read-only, separate COM connection on the watcher thread to the owned Excel instance, looked up by PID. A rejected or busy call skips that update and never fails the run. After the user chooses to keep waiting, prompt again 30 minutes later. Abort ends the runner tree first, then the owned Excel process.
+**Alternatives considered:**
+- `psutil` for process data — rejected; it adds a packaged dependency for functions that `pywin32` and the Windows API already provide.
+- Read progress on the main thread — impossible while the macro call is blocking.
+- Modify the LTM macro or the xlwings VBA to report progress — rejected; the model is not ours to change.
+- Kill only Excel on abort — rejected; the runner would be left trying to write to a dead Excel instance.
+- Prompt on stall or dialog detection — rejected; the user asked only for warnings there.
+**Rationale:** The LTM macro uses `WScript.Shell.Run` with `WaitOnReturn=True`, so the runner is an observable child process. The runner writes progress into the workbook through COM while the macro waits, which suggests Excel will also service a read-only progress query. A live test must confirm this before the progress line is relied on.
+**Superseded by:** Decision 102 bounds the duration of a progress COM query so it cannot block the watchdog.
+
+### Decision 102: Bound Property Stage 2 Progress Reads (2026-11-09)
+**Question:** Can a progress COM read itself block the watchdog while the LTM macro is busy?
+**Decided by:** Agent (pending user approval).
+**Choice:** Run each progress read on a dedicated daemon thread and wait no more than 5 seconds. If Excel does not respond, disable progress reads for the rest of that run and continue elapsed-time, process-activity and timeout monitoring.
+**Alternatives considered:**
+- Read on the watchdog thread without a deadline — rejected; a busy Excel COM call could block heartbeats, stall detection and the time-limit prompt.
+- Keep retrying with a new worker on every heartbeat after a hung read — rejected; it could accumulate blocked COM threads.
+- Remove scenario progress — rejected; the user requested it, and responsive COM reads can still provide it.
+**Rationale:** The watchdog must remain responsive even if Excel queues a read request. A single bounded worker preserves the other safeguards and prevents a repeated-query thread leak. This is a conservative fallback because the progress read has not yet been live-tested.
+**Superseded by:** Decision 103 approves this refinement and authorises build and promotion.
+
+## User-approved decisions
+
+### Decision 101: Approve Property Stage 2 Watchdog Implementation (2026-11-09)
+**Question:** Should the approved safeguard plan and its technical approach be implemented?
+**Decided by:** User, 9 November 2026.
+**Choice:** Proceed with implementation of Decisions 99 and 100 and `plan-property-stage-two-safeguards.md`. The live acceptance run and release promotion remain separate approval gates.
+**Alternatives considered:** Defer implementation or revise the watchdog design — not chosen.
+**Rationale:** The user approved implementation after reviewing the time-limit behaviour, warnings, process monitoring and abort handling.
+
+### Decision 103: Approve Property Stage 2 Safeguards Release (2026-11-09)
+**Question:** Should the bounded progress-read refinement in Decision 102 be approved and the safeguards be built and promoted?
+**Decided by:** User, 9 November 2026.
+**Choice:** Approve Decision 102 and build and promote the Property Stage 2 safeguards after the focused tests, packaged self-tests and published executable hash checks pass. The user requested "Sure, build and promote" after the refinement was explained. Do not initiate a live LTM run; live acceptance remains outstanding and is no longer a prerequisite for this requested release. This supersedes the release approval gate in Decision 101 and the dependency on live acceptance in step 7 of `plan-property-stage-two-safeguards.md`.
+**Alternatives considered:**
+- Leave Decision 102 pending and defer packaging - not chosen; the user accepted the refinement and requested build and promotion.
+- Require a live LTM acceptance run before promotion - not chosen for this release; the user requested promotion now, and live acceptance still needs separate approval.
+**Rationale:** The user wants the safeguards available in the packaged workflow. Automated and packaged checks remain mandatory, while live scenario-progress and abort behaviour must still be confirmed in a separately approved run.

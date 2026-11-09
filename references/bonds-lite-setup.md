@@ -42,13 +42,11 @@ existing scenario inputs, templates and output paths as configured; those data
 paths are separate from the application cache. Do not copy application files
 between releases or delete LocalAppData cache folders while a run is active.
 
-**Deployment status:** release `20261107-cache-v20` (built from `f57a808`) is
-active in the central pointer since 7 November 2026. It fixes Property Stage 2
-failing with "Cannot read the LTM Excel invocation time … Unknown name": Excel's
-`WorksheetFunction` has no `Now` member, so Stage 2 now reads the time with
-`Application.Evaluate("NOW()")`. Its self-tests passed and its executable hashes
-match `release.json`. To roll back, write `20261107-cache-v19` to the central
-`current.txt`.
+**Deployment status:** release `20261109-cache-v22` is active in the central
+pointer since 9 November 2026. It no longer requires the unused `O. ConcRisk`
+sheet to exist or contain data after a Property Stage 2 run. The controller,
+model and MACalc packaged self-tests passed. To roll back, write
+`20261107-cache-v20` to the central `current.txt`.
 
 Release `20261107-cache-v19` (built from `02c2fa0`) was active earlier on
 7 November 2026. It fixes Property Stage 2
@@ -592,13 +590,32 @@ automated timeout or process termination.
 Stage 2 saves in place only after confirming fresh `RunStartTime` and
 `RunEndTime` values, completion markers for every scenario, the final
 `End of multirun!` progress message, and non-blank output on `O. CFOutput`,
-`O. PVOutput` and `O. ConcRisk`. It then confirms Excel reports the workbook
-saved and its modification time advanced. If a run or check fails before that
-commit, the Stage 1 workbook is closed without saving. If post-save
-verification fails, the original workbook is restored from a temporary
-pre-run copy. A successfully verified LTM workbook is retained if only the
-final Draft audit save fails; the audit reports the distinct workbook and
-Draft states and retains the previous `Last Successful Run`.
+`O. PVOutput`. The unused `O. ConcRisk` tab is not validated and may be empty
+or absent. It then confirms Excel reports the workbook saved and its
+modification time advanced. If a run or check fails before that commit, the
+Stage 1 workbook is closed without saving. If post-save verification fails,
+the original workbook is restored from a temporary pre-run copy. A
+successfully verified LTM workbook is retained if only the final Draft audit
+save fails; the audit reports the distinct workbook and Draft states and
+retains the previous `Last Successful Run`.
+
+While the LTM macro runs, Stage 2 reports elapsed time and, when Excel allows a
+read-only progress query, the number of completed scenarios every five
+minutes. The query has a five-second limit; if Excel does not respond, scenario
+updates are disabled for the rest of that run while the other safeguards
+continue. Stage 2 warns if the runner has had no CPU activity for 10 minutes.
+If the runner exits but the macro is still waiting after two minutes, check the
+LTM Excel window for an error dialog. These warnings do not stop the run.
+
+The time limit is 10 minutes per scenario, with a 30-minute minimum (160
+minutes for 16 scenarios). At the limit, the console asks whether to wait 30
+more minutes or abort. A blank response or no response keeps the run going.
+Choosing abort ends the LTM runner and only the separate Excel instance owned
+by Stage 2; it never closes the Excel instance containing the Draft. Stage 2
+does not save the LTM workbook and restores the Stage 1 copy if it changed.
+The audit status is `Timed Out`. In source mode only, `SST_P2_TIME_LIMIT_MINUTES`
+can temporarily override the limit for acceptance testing; the packaged
+runtime ignores this override.
 
 The LTM macro normally clears `O. NoteVal` and the `O. NoteValRebase` table.
 Stage 2 does not snapshot, restore, validate or populate these areas. The

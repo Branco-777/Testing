@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import threading
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -338,7 +339,7 @@ def test_verify_ltm_run_requires_finish_at_or_after_start() -> None:
 
 @pytest.mark.parametrize(
     "empty_sheet",
-    ["O. CFOutput", "O. PVOutput", "O. ConcRisk"],
+    ["O. CFOutput", "O. PVOutput"],
 )
 def test_verify_ltm_run_rejects_each_empty_output(empty_sheet: str) -> None:
     stage_two = _stage_two()
@@ -360,6 +361,25 @@ def test_verify_ltm_run_rejects_each_empty_output(empty_sheet: str) -> None:
         stage_two.verify_ltm_run(workbook, datetime(2026, 11, 7, 2), 1)
 
 
+@pytest.mark.parametrize("include_concrisk", [True, False])
+def test_verify_ltm_run_accepts_empty_or_missing_concrisk(
+    include_concrisk: bool,
+) -> None:
+    stage_two = _stage_two()
+    outputs = {"O. CFOutput": [[1]], "O. PVOutput": [[1]]}
+    if include_concrisk:
+        outputs["O. ConcRisk"] = [[None, "  "]]
+    workbook = stage_two_test_workbook(
+        start=datetime(2026, 11, 7, 2),
+        finish=datetime(2026, 11, 7, 2, 1),
+        scenarios=1,
+        progress=["Run 1 - End of run!", "End of multirun!"],
+        outputs=outputs,
+    )
+
+    assert stage_two.verify_ltm_run(workbook, datetime(2026, 11, 7, 2), 1) is None
+
+
 def _run_harness(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -372,6 +392,7 @@ def _run_harness(
     data_source: str = "SQLserver",
     autosave_can_be_disabled: bool = True,
     macro_overwrites_workbook: bool = False,
+    macro_release: threading.Event | None = None,
 ) -> tuple[Any, list[tuple[Any, ...]], list[dict[str, object]], Any, Path]:
     """Run Stage 2 through fake Excel while recording every external action."""
     stage_two = _stage_two()
@@ -431,6 +452,8 @@ def _run_harness(
                         original_mtime + 2_000_000_000,
                     ),
                 )
+            if macro_release is not None:
+                macro_release.wait(timeout=2)
             if macro_error is not None:
                 raise macro_error
             if not complete_run:
@@ -457,6 +480,7 @@ def _run_harness(
         return invoke
 
     workbook.macro = macro
+    workbook.name = target.name
 
     def save() -> None:
         events.append(("save",))
@@ -482,6 +506,7 @@ def _run_harness(
 
     class FakeApplication:
         def __init__(self) -> None:
+            self.pid = 4321
             self.api = SimpleNamespace(
                 AutomationSecurity=None,
                 DisplayAlerts=True,
@@ -591,6 +616,111 @@ def test_run_macro_failure_closes_without_saving_and_retains_last_success(
     assert audits[-1]["status"] == "Failed"
     assert audits[-1]["last_successful_run"] == datetime(2026, 10, 1)
     assert target.read_bytes() == b"prepared workbook"
+
+
+def test_run_records_timed_out_and_restores_when_aborted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release_macro = threading.Event()
+    stage_two, events, audits, caller, target = _run_harness(
+        tmp_path,
+        monkeypatch,
+        macro_error=RuntimeError("COM call interrupted by runner termination"),
+        macro_overwrites_workbook=True,
+        macro_release=release_macro,
+    )
+    watchdog_events: list[str] = []
+
+    class AbortedWatchdog:
+        aborted = True
+
+        def start(self) -> None:
+            watchdog_events.append("start")
+            threading.Timer(0.01, release_macro.set).start()
+
+        def stop(self) -> None:
+            watchdog_events.append("stop")
+
+        def join(self) -> None:
+            watchdog_events.append("join")
+
+    monkeypatch.setattr(
+        stage_two,
+        "LtmRunWatchdog",
+        lambda *_args, **_kwargs: AbortedWatchdog(),
+        raising=False,
+    )
+    guard_events: list[str] = []
+
+    @contextlib.contextmanager
+    def tracked_guard(*_args: Any, **_kwargs: Any) -> Any:
+        guard_events.append("acquired")
+        try:
+            yield
+        finally:
+            guard_events.append("released")
+
+    monkeypatch.setattr(stage_two.shared, "workbook_run_guard", tracked_guard)
+
+    with pytest.raises(stage_two.PropertyStageTwoError, match="timed out"):
+        stage_two.run_property_stage_two(caller)
+
+    assert audits[-1]["status"] == "Timed Out"
+    assert not any(event[0] == "save" for event in events)
+    assert not any(event[0] in {"close_workbook", "quit"} for event in events)
+    assert target.read_bytes() == b"prepared workbook"
+    assert watchdog_events == ["start", "stop", "join"]
+    assert guard_events == ["acquired", "released"]
+
+
+@pytest.mark.parametrize(
+    ("macro_error", "expected_status"),
+    [(None, "Succeeded"), (RuntimeError("VBA failed"), "Failed")],
+)
+def test_run_stops_and_joins_watchdog_on_success_and_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    macro_error: BaseException | None,
+    expected_status: str,
+) -> None:
+    stage_two, events, audits, caller, target = _run_harness(
+        tmp_path, monkeypatch, macro_error=macro_error
+    )
+    lifecycle: list[str] = []
+
+    class RecordingWatchdog:
+        aborted = False
+
+        def start(self) -> None:
+            lifecycle.append("start")
+            events.append(("watchdog", "start"))
+
+        def stop(self) -> None:
+            lifecycle.append("stop")
+            events.append(("watchdog", "stop"))
+
+        def join(self) -> None:
+            lifecycle.append("join")
+            events.append(("watchdog", "join"))
+
+    monkeypatch.setattr(
+        stage_two,
+        "LtmRunWatchdog",
+        lambda *_args, **_kwargs: RecordingWatchdog(),
+        raising=False,
+    )
+
+    if macro_error is None:
+        assert stage_two.run_property_stage_two(caller) == target
+    else:
+        with pytest.raises(BondsLiteError, match="CallRunFrozenPython failed"):
+            stage_two.run_property_stage_two(caller)
+
+    macro_index = next(i for i, event in enumerate(events) if event[0] == "macro")
+    assert lifecycle == ["start", "stop", "join"]
+    assert expected_status in [audit["status"] for audit in audits]
+    watchdog_indexes = [i for i, event in enumerate(events) if event[0] == "watchdog"]
+    assert watchdog_indexes[0] < macro_index < watchdog_indexes[1] < watchdog_indexes[2]
 
 
 def test_run_turns_off_autosave_before_the_macro_runs(
@@ -772,7 +902,6 @@ def test_stage_two_outputs_do_not_include_macro_cleared_noteval_areas() -> None:
     assert stage_two.LTM_OUTPUT_SHEETS == (
         "O. CFOutput",
         "O. PVOutput",
-        "O. ConcRisk",
     )
     assert not any("NoteVal" in sheet for sheet in stage_two.LTM_OUTPUT_SHEETS)
 

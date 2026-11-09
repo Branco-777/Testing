@@ -130,6 +130,8 @@ def pyinstaller_command(
             "sst_property_stage_one",
             "--hidden-import",
             "sst_property_stage_two",
+            "--hidden-import",
+            "sst_property_stage_two_watchdog",
         ]
         for module in ("scipy", "numba", "llvmlite", "pandas", "numpy"):
             options += ["--exclude-module", module]

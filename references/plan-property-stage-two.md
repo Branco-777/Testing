@@ -66,8 +66,9 @@ original and the Stage 1 output were not changed during discovery.
    - The progress log contains `Run N - End of run!` for every scenario from
      1 through the current `prm_NoOfScens`, and its last non-blank message is
      exactly `End of multirun!`.
-   - `O. CFOutput`, `O. PVOutput`, and `O. ConcRisk` each contain at least one
-     non-blank cell after the run. Do not add a row-1 run-number check yet.
+   - `O. CFOutput` and `O. PVOutput` each contain at least one non-blank cell
+     after the run. The unused `O. ConcRisk` tab is not validated and may be
+     empty or absent. Do not add a row-1 run-number check yet.
    - After saving, `Workbook.Saved` is true and the file modification time is
      later than the pre-run value.
 7. Set no Stage 2 timeout. The visible Excel instance may display a model error
