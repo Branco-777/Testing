@@ -956,3 +956,13 @@ The packaged controller and a new packaged MACalc model app are built, and the r
 - Leave Decision 102 pending and defer packaging - not chosen; the user accepted the refinement and requested build and promotion.
 - Require a live LTM acceptance run before promotion - not chosen for this release; the user requested promotion now, and live acceptance still needs separate approval.
 **Rationale:** The user wants the safeguards available in the packaged workflow. Automated and packaged checks remain mandatory, while live scenario-progress and abort behaviour must still be confirmed in a separately approved run.
+
+### Decision 104: Load JRC In Property Stage 2 And Reject Invalid Curves Or PVs (2026-11-09)
+**Question:** A Property Stage 2 run produced an all-zero `O. PVOutput`. How should Stage 2 prevent and detect this?
+**Decided by:** User, 9 November 2026 (Option 1 plus both checks).
+**Choice:** Before opening the LTM workbook, register in Stage 2's own Excel instance the XLL add-ins that the user's normal Excel opens at start-up. These are read from the `OPEN*` values under `HKCU\Software\Microsoft\Office\16.0\Excel\Options`; on this machine the JUST DataMart loader provides `JRC_SpotAnnual`. Keep the full recalculation. Then stop before the macro if any `tbl_Curves` (`P. Curves`) data value is not numeric. After the run, fail without saving if any scenario in `O. PVOutput` is missing or has no non-zero PV.
+**Alternatives considered:**
+- Replace the full recalculation with a normal one — rejected by the user; it would rely on curves cached by an earlier Excel session.
+- Hard-code the DataMart add-in path — rejected; the path is per-user and could change when the add-in is updated, while the registry entry reflects what normal Excel loads.
+- Checks only, without loading the add-in — rejected; the run would fail every time instead of working.
+**Rationale:** An Excel instance started by automation does not load start-up add-ins. `CalculateFullRebuild` therefore turned every `P. Curves` value into `#NAME?`. LTM discounted with NaN curves, and its pandas total turned NaN PVs into exact zeros, which passed the non-blank output check. In a disposable-copy test, registering the DataMart loader in an automation instance produced numeric curves equal to the cached values after a full rebuild.

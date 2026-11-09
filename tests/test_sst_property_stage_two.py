@@ -34,6 +34,21 @@ def _name(value: object) -> Any:
     )
 
 
+def _pv_grid(scenarios: int, value: float = 5.0) -> list[list[object]]:
+    """Mimic LTM's PV layout: run numbers in row 1, totals from row 3."""
+    headers: list[object] = [None]
+    labels: list[object] = ["ContractReference_Data"]
+    totals: list[object] = ["total"]
+    for scenario in range(1, scenarios + 1):
+        headers += [float(scenario), None]
+        labels += ["Redemptions", "ISMInt"]
+        totals += [value, 0.0]
+    return [headers, labels, totals]
+
+
+VALID_CURVES = [["Month", "GBPSONIAspot"], [1.0, 0.038], [2.0, 0.0379]]
+
+
 def _draft(
     path: Path,
     handoff: object,
@@ -275,7 +290,7 @@ def test_verify_ltm_run_requires_fresh_timestamps_and_all_outputs() -> None:
         finish=datetime(2026, 11, 7, 2, 1),
         scenarios=2,
         progress=["Run 1 - End of run!", "Run 2 - End of run!", "End of multirun!"],
-        outputs={"O. CFOutput": [[1]], "O. PVOutput": [[1]], "O. ConcRisk": [[1]]},
+        outputs={"O. CFOutput": [[1]], "O. PVOutput": _pv_grid(2), "O. ConcRisk": [[1]]},
     )
 
     assert stage_two.verify_ltm_run(workbook, invoked, 2) is None
@@ -288,7 +303,7 @@ def test_verify_ltm_run_rejects_missing_scenario_marker() -> None:
         finish=datetime(2026, 11, 7, 2, 1),
         scenarios=2,
         progress=["Run 1 - End of run!", "End of multirun!"],
-        outputs={"O. CFOutput": [[1]], "O. PVOutput": [[1]], "O. ConcRisk": [[1]]},
+        outputs={"O. CFOutput": [[1]], "O. PVOutput": _pv_grid(2), "O. ConcRisk": [[1]]},
     )
 
     with pytest.raises(BondsLiteError, match="Run 2 - End of run"):
@@ -302,7 +317,7 @@ def test_verify_ltm_run_rejects_wrong_terminal_message() -> None:
         finish=datetime(2026, 11, 7, 2, 1),
         scenarios=1,
         progress=["Run 1 - End of run!", "Unexpected"],
-        outputs={"O. CFOutput": [[1]], "O. PVOutput": [[1]], "O. ConcRisk": [[1]]},
+        outputs={"O. CFOutput": [[1]], "O. PVOutput": _pv_grid(2), "O. ConcRisk": [[1]]},
     )
 
     with pytest.raises(BondsLiteError, match="End of multirun"):
@@ -316,7 +331,7 @@ def test_verify_ltm_run_rejects_stale_timestamps() -> None:
         finish=datetime(2026, 11, 7, 1, 1),
         scenarios=1,
         progress=["Run 1 - End of run!", "End of multirun!"],
-        outputs={"O. CFOutput": [[1]], "O. PVOutput": [[1]], "O. ConcRisk": [[1]]},
+        outputs={"O. CFOutput": [[1]], "O. PVOutput": _pv_grid(2), "O. ConcRisk": [[1]]},
     )
 
     with pytest.raises(BondsLiteError, match="RunStartTime is stale"):
@@ -330,7 +345,7 @@ def test_verify_ltm_run_requires_finish_at_or_after_start() -> None:
         finish=datetime(2026, 11, 7, 2),
         scenarios=1,
         progress=["Run 1 - End of run!", "End of multirun!"],
-        outputs={"O. CFOutput": [[1]], "O. PVOutput": [[1]], "O. ConcRisk": [[1]]},
+        outputs={"O. CFOutput": [[1]], "O. PVOutput": _pv_grid(2), "O. ConcRisk": [[1]]},
     )
 
     with pytest.raises(BondsLiteError, match="RunEndTime is before"):
@@ -345,7 +360,7 @@ def test_verify_ltm_run_rejects_each_empty_output(empty_sheet: str) -> None:
     stage_two = _stage_two()
     outputs = {
         "O. CFOutput": [[1]],
-        "O. PVOutput": [[1]],
+        "O. PVOutput": _pv_grid(2),
         "O. ConcRisk": [[1]],
     }
     outputs[empty_sheet] = [[None, "  "]]
@@ -366,7 +381,7 @@ def test_verify_ltm_run_accepts_empty_or_missing_concrisk(
     include_concrisk: bool,
 ) -> None:
     stage_two = _stage_two()
-    outputs = {"O. CFOutput": [[1]], "O. PVOutput": [[1]]}
+    outputs = {"O. CFOutput": [[1]], "O. PVOutput": _pv_grid(2)}
     if include_concrisk:
         outputs["O. ConcRisk"] = [[None, "  "]]
     workbook = stage_two_test_workbook(
@@ -378,6 +393,85 @@ def test_verify_ltm_run_accepts_empty_or_missing_concrisk(
     )
 
     assert stage_two.verify_ltm_run(workbook, datetime(2026, 11, 7, 2), 1) is None
+
+
+def test_verify_ltm_run_rejects_all_zero_pvs_for_a_scenario() -> None:
+    stage_two = _stage_two()
+    pvs = _pv_grid(2)
+    pvs[2][3] = 0.0  # scenario 2's non-zero total
+    workbook = stage_two_test_workbook(
+        start=datetime(2026, 11, 7, 2),
+        finish=datetime(2026, 11, 7, 2, 1),
+        scenarios=2,
+        progress=["Run 1 - End of run!", "Run 2 - End of run!", "End of multirun!"],
+        outputs={"O. CFOutput": [[1]], "O. PVOutput": pvs},
+    )
+
+    with pytest.raises(BondsLiteError, match=r"non-zero PVs for scenario\(s\) 2;"):
+        stage_two.verify_ltm_run(workbook, datetime(2026, 11, 7, 2), 2)
+
+
+def test_verify_ltm_run_rejects_a_scenario_missing_from_pv_output() -> None:
+    stage_two = _stage_two()
+    workbook = stage_two_test_workbook(
+        start=datetime(2026, 11, 7, 2),
+        finish=datetime(2026, 11, 7, 2, 1),
+        scenarios=2,
+        progress=["Run 1 - End of run!", "Run 2 - End of run!", "End of multirun!"],
+        outputs={"O. CFOutput": [[1]], "O. PVOutput": _pv_grid(1)},
+    )
+
+    with pytest.raises(BondsLiteError, match=r"scenario\(s\) 2;"):
+        stage_two.verify_ltm_run(workbook, datetime(2026, 11, 7, 2), 2)
+
+
+@pytest.mark.parametrize(
+    "curves",
+    [
+        [["Month", "GBPSONIAspot"], [1.0, None]],
+        [["Month", "GBPSONIAspot"], [1.0, "#NAME?"]],
+        [["Month", "GBPSONIAspot"]],
+    ],
+)
+def test_require_numeric_curves_rejects_uncalculated_curves(
+    curves: list[list[object]],
+) -> None:
+    stage_two = _stage_two()
+    workbook = SimpleNamespace(names={"tbl_Curves": _name(curves)})
+
+    with pytest.raises(BondsLiteError, match="JRC add-in"):
+        stage_two._require_numeric_curves(workbook)
+
+
+def test_startup_addin_paths_reads_excel_open_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage_two = _stage_two()
+    entries = [
+        ("OPEN", r'/R "C:\Add Ins\jrc loader.dll"'),
+        ("OPEN1", r"C:\AddIns\other.xll"),
+        ("OPEN2", r'"C:\AddIns\tools.xlam"'),
+        ("Options", "OPEN-like but ignored"),
+    ]
+
+    @contextlib.contextmanager
+    def open_key(_root: object, _path: str) -> Any:
+        yield "key"
+
+    def enum_value(_key: object, index: int) -> tuple[str, str, int]:
+        if index >= len(entries):
+            raise OSError
+        return (*entries[index], 1)
+
+    fake_winreg = SimpleNamespace(
+        HKEY_CURRENT_USER=object(), OpenKey=open_key, EnumValue=enum_value
+    )
+    monkeypatch.setitem(__import__("sys").modules, "winreg", fake_winreg)
+
+    assert stage_two._startup_addin_paths() == [
+        r"C:\Add Ins\jrc loader.dll",
+        r"C:\AddIns\other.xll",
+    ]
 
 
 def _run_harness(
@@ -393,6 +487,8 @@ def _run_harness(
     autosave_can_be_disabled: bool = True,
     macro_overwrites_workbook: bool = False,
     macro_release: threading.Event | None = None,
+    curves: list[list[object]] | None = None,
+    pv_value: float = 5.0,
 ) -> tuple[Any, list[tuple[Any, ...]], list[dict[str, object]], Any, Path]:
     """Run Stage 2 through fake Excel while recording every external action."""
     stage_two = _stage_two()
@@ -417,6 +513,7 @@ def _run_harness(
         {
             "prm_LocalRun": _name(local_run),
             "prm_DataSource": _name(data_source),
+            "tbl_Curves": _name(VALID_CURVES if curves is None else curves),
         }
     )
     class FakeWorkbookApi(SimpleNamespace):
@@ -476,6 +573,9 @@ def _run_harness(
             )
             for sheet in workbook.sheets.values():
                 sheet.api.UsedRange.Value = [[1]]
+            workbook.sheets["O. PVOutput"].api.UsedRange.Value = _pv_grid(
+                2, pv_value
+            )
 
         return invoke
 
@@ -515,6 +615,10 @@ def _run_harness(
                     invocation_time if formula == "NOW()" else pytest.fail(formula)
                 ),
                 CalculateFullRebuild=lambda: events.append(("recalculate",)),
+                RegisterXLL=lambda path: (
+                    events.append(("register_xll", path)),
+                    True,
+                )[1],
             )
             self.books = SimpleNamespace(
                 open=lambda path, **kwargs: (
@@ -550,6 +654,9 @@ def _run_harness(
         ),
     )
     monkeypatch.setattr(stage_two, "_check_runner", lambda: None)
+    monkeypatch.setattr(
+        stage_two, "_startup_addin_paths", lambda: [r"C:\AddIns\jrc.dll"]
+    )
     monkeypatch.setattr(stage_two, "_ensure_workbook_not_open", lambda *_args: None)
     monkeypatch.setattr(
         stage_two,
@@ -596,6 +703,46 @@ def test_run_uses_separate_visible_excel_and_saves_after_verified_macro(
         ("close_workbook", {"SaveChanges": False}),
         ("quit",),
     ]
+
+
+def test_run_loads_startup_addins_before_opening_the_workbook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage_two, events, _audits, caller, _target = _run_harness(tmp_path, monkeypatch)
+
+    stage_two.run_property_stage_two(caller)
+
+    open_index = next(i for i, event in enumerate(events) if event[0] == "open")
+    assert events.index(("register_xll", r"C:\AddIns\jrc.dll")) < open_index
+
+
+def test_run_rejects_uncalculated_curves_before_calling_macro(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage_two, events, audits, caller, _target = _run_harness(
+        tmp_path, monkeypatch, curves=[["Month", "GBPSONIAspot"], [1.0, None]]
+    )
+
+    with pytest.raises(BondsLiteError, match="JRC add-in"):
+        stage_two.run_property_stage_two(caller)
+
+    assert not any(event[0] == "macro" for event in events)
+    assert ("save",) not in events
+    assert audits[-1]["status"] == "Failed"
+
+
+def test_run_rejects_all_zero_pvs_without_saving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage_two, events, audits, caller, _target = _run_harness(
+        tmp_path, monkeypatch, pv_value=0.0
+    )
+
+    with pytest.raises(BondsLiteError, match="non-zero PVs"):
+        stage_two.run_property_stage_two(caller)
+
+    assert ("save",) not in events
+    assert audits[-1]["status"] == "Failed"
 
 
 def test_run_macro_failure_closes_without_saving_and_retains_last_success(

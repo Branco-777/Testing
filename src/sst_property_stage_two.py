@@ -87,6 +87,9 @@ LTM_RUN_END_NAME = "RunEndTime"
 LTM_SCENARIO_COUNT_NAME = "prm_NoOfScens"
 LTM_PROGRESS_FIRST_NAME = "ProgressFirstCell"
 LTM_OUTPUT_SHEETS = ("O. CFOutput", "O. PVOutput")
+LTM_PV_SHEET = "O. PVOutput"
+LTM_CURVES_NAME = "tbl_Curves"
+EXCEL_OPTIONS_KEY = r"Software\Microsoft\Office\16.0\Excel\Options"
 XL_UP = -4162
 XL_AUTOMATION_SECURITY_LOW = 1
 
@@ -364,6 +367,127 @@ def verify_ltm_run(
             raise PropertyStageTwoError(
                 f"LTM output sheet {sheet_name} is empty after the run"
             )
+    _require_nonzero_pvs(workbook, expected_scenarios)
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, Real) and not isinstance(value, bool)
+
+
+def _scenario_number(header: object) -> int | None:
+    if _is_number(header) and float(header).is_integer():
+        return int(header)
+    return None
+
+
+def _require_nonzero_pvs(workbook: Any, expected_scenarios: int) -> None:
+    """Reject a run in which any scenario's PVs are all zero or missing.
+
+    LTM writes each scenario's run number in row 1 above its PV columns and
+    the results from row 3. Unavailable discount curves produce NaN PVs,
+    which LTM's total turns into exact zeros rather than an error.
+    """
+    try:
+        grid = workbook.sheets[LTM_PV_SHEET].api.UsedRange.Value
+    except Exception as error:
+        raise PropertyStageTwoError(
+            f"Cannot inspect LTM output sheet {LTM_PV_SHEET}: {error}"
+        ) from error
+    rows = [
+        list(row) if isinstance(row, (tuple, list)) else [row]
+        for row in (grid if isinstance(grid, (tuple, list)) else [[grid]])
+    ]
+    headers = rows[0] if rows else []
+    starts = [
+        (column, scenario)
+        for column, header in enumerate(headers)
+        if (scenario := _scenario_number(header)) is not None
+    ]
+    has_value: dict[int, bool] = {}
+    for index, (start, scenario) in enumerate(starts):
+        end = starts[index + 1][0] if index + 1 < len(starts) else len(headers)
+        has_value[scenario] = any(
+            _is_number(value) and value != 0
+            for row in rows[2:]
+            for value in row[start:end]
+        )
+    failed = [
+        str(scenario)
+        for scenario in range(1, expected_scenarios + 1)
+        if not has_value.get(scenario, False)
+    ]
+    if failed:
+        raise PropertyStageTwoError(
+            f"LTM {LTM_PV_SHEET} has no non-zero PVs for scenario(s) "
+            f"{', '.join(failed)}; check that P. Curves calculated and the JRC "
+            "add-in is available"
+        )
+
+
+def _startup_addin_paths() -> list[str]:
+    """Return the XLL add-ins the user's normal Excel opens at start-up.
+
+    Excel started through automation skips these, so `JRC_SpotAnnual` in
+    P. Curves would otherwise recalculate to #NAME?.
+    """
+    import winreg
+
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, EXCEL_OPTIONS_KEY)
+    except OSError:
+        return []
+    paths: list[str] = []
+    with key:
+        index = 0
+        while True:
+            try:
+                name, value, _ = winreg.EnumValue(key, index)
+            except OSError:
+                break
+            index += 1
+            if not re.fullmatch(r"OPEN\d*", name, re.IGNORECASE):
+                continue
+            if not isinstance(value, str):
+                continue
+            quoted = re.search(r'"([^"]+)"', value)
+            path = quoted.group(1) if quoted else re.sub(r"^(/\S+\s+)*", "", value)
+            if path.strip().casefold().endswith((".xll", ".dll")):
+                paths.append(path.strip())
+    return paths
+
+
+def _load_startup_addins(application: Any) -> None:
+    """Register the user's start-up XLL add-ins in the owned Excel instance."""
+    for path in _startup_addin_paths():
+        try:
+            registered = bool(application.api.RegisterXLL(path))
+        except Exception as error:
+            registered = False
+            logger.warning("Could not load Excel add-in %s: %s", path, error)
+        if not registered:
+            logger.warning("Excel add-in did not load: %s", path)
+
+
+def _require_numeric_curves(workbook: Any) -> None:
+    """Stop before the macro when any P. Curves value failed to calculate."""
+    try:
+        values = workbook.names[LTM_CURVES_NAME].refers_to_range.value
+    except Exception as error:
+        raise PropertyStageTwoError(
+            f"LTM workbook is missing a usable {LTM_CURVES_NAME} name: {error}"
+        ) from error
+    rows = values if isinstance(values, (tuple, list)) else [[values]]
+    data = [
+        value
+        for row in rows[1:]
+        for value in (row if isinstance(row, (tuple, list)) else (row,))
+    ]
+    if not data or not all(_is_number(value) for value in data):
+        raise PropertyStageTwoError(
+            "LTM P. Curves contains errors or blanks after recalculation; "
+            "the JRC add-in (JRC_SpotAnnual) did not load in the Stage 2 Excel. "
+            "Check the JUST DataMart add-in is installed and loads in normal Excel"
+        )
 
 
 def _scenario_count(workbook: Any) -> int:
@@ -611,6 +735,7 @@ def run_property_stage_two(caller: Any) -> Path:
             shutil.copy2(inputs.workbook_path, backup_path)
             application = xw.App(visible=True, add_book=False)
             application.api.AutomationSecurity = XL_AUTOMATION_SECURITY_LOW
+            _load_startup_addins(application)
             # The LTM template is saved "read-only recommended"; Stage 1 copies inherit it.
             workbook = application.books.open(
                 str(inputs.workbook_path),
@@ -628,6 +753,7 @@ def run_property_stage_two(caller: Any) -> Path:
                 )
             _validate_local_run_settings(workbook)
             application.api.CalculateFullRebuild()
+            _require_numeric_curves(workbook)
             invocation_time = _excel_now(application)
             scenarios = _scenario_count(workbook)
             try:
