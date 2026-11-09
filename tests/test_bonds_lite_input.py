@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -1911,6 +1912,28 @@ def test_packaged_builder_caches_model_applications_only_after_self_tests_pass(
     harness.release()
 
     assert harness.builds == ["BondsLiteController", "BondsLiteModel", "MACalcModel"]
+
+
+@pytest.mark.parametrize(
+    ("returncode", "message"),
+    [(8, "robocopy failed"), (1, "missing or incomplete after publishing")],
+)
+def test_packaged_builder_removes_partial_release_when_publishing_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, returncode: int, message: str
+) -> None:
+    harness = _BuilderHarness(tmp_path, monkeypatch)
+    (harness.release_root / "current.txt").write_text("previous", encoding="ascii")
+
+    def fake_robocopy(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        assert command[0] == "robocopy" and "/MT:16" in command
+        return subprocess.CompletedProcess(command, returncode, "", "")
+
+    monkeypatch.setattr(harness.builder.subprocess, "run", fake_robocopy)
+    with pytest.raises(RuntimeError, match=message):
+        harness.release("--promote")
+
+    assert not (harness.release_root / "releases" / "release-1").exists()
+    assert (harness.release_root / "current.txt").read_bytes() == b"previous"
 
 def test_pyinstaller_command_hidden_imports_controller_stages_only(
     tmp_path: Path,

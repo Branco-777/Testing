@@ -535,6 +535,13 @@ every build. Pass `--rebuild-all` (or `--clean`) to force a full rebuild.
 The release copy to the central folder is unchanged and still includes every
 application, because the Excel launcher installs whole releases.
 
+The builder publishes with `robocopy /MT:16` and then checks that every staged
+file exists in the release with the same size. If the copy fails or is
+incomplete, it deletes the partial release folder and leaves `current.txt`
+unchanged. The copy is limited by network bandwidth (about 1 MB/s measured on
+9 November 2026), so multi-threading saves only about 5%. Expect about
+10 minutes to publish a full 636 MB release.
+
 Commit, build, promotion and the packaged button run are separate approval
 gates. Build under a new release ID without `--promote`, verify all three
 self-tests, and obtain approval before changing `current.txt`. Release

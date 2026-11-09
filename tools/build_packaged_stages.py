@@ -253,6 +253,52 @@ def store_component(
     (cache / "component.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
 
 
+def publish_bundle(bundle: Path, output: Path) -> None:
+    """Copy the verified bundle to the release folder with multi-threaded robocopy.
+
+    The central share is the slow step of a release, so files are copied in
+    parallel. Every staged file must then exist in the release with the same
+    size; otherwise the partial release folder is removed.
+    """
+    command = [
+        "robocopy",
+        str(bundle),
+        str(output),
+        "/E",
+        "/MT:16",
+        "/R:2",
+        "/W:5",
+        "/NP",
+        "/NFL",
+        "/NDL",
+        "/NJH",
+    ]
+    print("Running: " + subprocess.list2cmdline(command), flush=True)
+    try:
+        # Robocopy exit codes below 8 mean success; 8 or above mean failures.
+        result = subprocess.run(command, capture_output=True, text=True, errors="replace")
+        if result.returncode >= 8:
+            print(result.stdout[-12000:], result.stderr[-12000:], flush=True)
+            raise RuntimeError(f"robocopy failed with exit code {result.returncode}")
+        missing = [
+            str(source.relative_to(bundle))
+            for source in bundle.rglob("*")
+            if source.is_file()
+            and (
+                not (target := output / source.relative_to(bundle)).is_file()
+                or target.stat().st_size != source.stat().st_size
+            )
+        ]
+        if missing:
+            raise RuntimeError(
+                f"{len(missing)} file(s) missing or incomplete after publishing, "
+                f"e.g. {missing[0]}"
+            )
+    except BaseException:
+        shutil.rmtree(output.parent, ignore_errors=True)
+        raise
+
+
 def collect_licences(python: Path, destination: Path, project: Path) -> None:
     """Include available runtime dependency licences alongside the application."""
     probe = (
@@ -467,7 +513,7 @@ def main() -> int:
             json.dumps(manifest, indent=2), encoding="utf-8"
         )
         release_parent.mkdir(parents=True)
-        shutil.copytree(bundle, output)
+        publish_bundle(bundle, output)
     if options.promote:
         release_root.mkdir(parents=True, exist_ok=True)
         pointer_temporary = release_root / f"current-{os.getpid()}.tmp"

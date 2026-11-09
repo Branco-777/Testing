@@ -976,3 +976,10 @@ The packaged controller and a new packaged MACalc model app are built, and the r
 - Reference shared component folders across releases instead of copying them — rejected; the Excel launcher installs a whole release folder, so it would need workbook VBA changes.
 - Copy the model applications from the previous central release — rejected; that reads about 600 MB from the network, and older manifests have no fingerprint to confirm they match.
 **Rationale:** The model and MACalc builds take most of the PyInstaller time and rarely change. A content fingerprint makes reuse safe without manual judgement, and any input change triggers a rebuild.
+
+### Decision 106: Publish Releases With Robocopy And Verify The Copy (2026-11-09)
+**Question:** Can the release copy to the central share be made faster?
+**Decided by:** User requested the change, 9 November 2026.
+**Choice:** Publish with `robocopy /E /MT:16 /R:2 /W:5`, treating exit codes of 8 or above as failure. Then require every staged file to exist in the release with the same size. On any failure, delete the partial release folder before `current.txt` is touched.
+**Alternatives considered:** Keep `shutil.copytree` — rejected; it neither verifies the copy nor removes a partial release, and it was slightly slower.
+**Rationale:** Measured on the 284 MB, 869-file Model application, `shutil.copytree` took 306 s and robocopy plus verification took 288 s. Both ran at about 1 MB/s, so the network bandwidth, not per-file overhead, limits the copy. The speed gain is small, but the verification and clean-up make failed publications safer. Larger savings would need less data to transfer, for example a smaller bundle or releases that share unchanged components. That would require changes to the Excel launcher.
