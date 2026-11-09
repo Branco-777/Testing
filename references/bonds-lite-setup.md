@@ -1,12 +1,12 @@
 # Bonds Lite Input Setup And Use
 
-Version 1.2 | 9 November 2026 | Local-cache v23 active; Property Stage 2 safeguards
+Version 1.3 | 9 November 2026 | Local-cache v24 active; Property Stage 2 safeguards
 
 ## Overview
 
 Generate Bonds Lite Input on the Draft workbook's I. Control sheet starts the workflow through a small VBA launcher. Stage 1 prepares two validated inputs, Bonds and MAP, using one template and one captured set of date/entity/stresses. Both must succeed before the run folder becomes eligible for Stage 2. Stage 2 runs the unchanged folder-based Bonds Lite batch against that exact pair.
 
-The colleague deployment uses frozen controller/model executables cached under the current Windows user's LocalAppData. Draft stays in the user's locally synced SharePoint/OneDrive folder; the launcher resolves that user's local Draft path and attaches to the exact open Excel instance. The central release share is checked once at the first button click in each Excel session. Later clicks use the local cache without network access. Release v23 is active and Stage 1 reads its three path controls through workbook names.
+The colleague deployment uses frozen controller/model executables cached under the current Windows user's LocalAppData. Draft stays in the user's locally synced SharePoint/OneDrive folder; the launcher resolves that user's local Draft path and attaches to the exact open Excel instance. The central release share is checked once at the first button click in each Excel session. Later clicks use the local cache without network access. Release v24 is active and Stage 1 reads its three path controls through workbook names.
 
 ## Prerequisites
 
@@ -42,20 +42,25 @@ existing scenario inputs, templates and output paths as configured; those data
 paths are separate from the application cache. Do not copy application files
 between releases or delete LocalAppData cache folders while a run is active.
 
-**Deployment status:** release `20261109-cache-v23` is active in the central
-pointer since 9 November 2026, 11:53 UTC (built from `e571716`). It adds
-Property Stage 2 heartbeats, scenario progress when readable, activity
-warnings and the user-controlled time-limit prompt. The controller, model
-and MACalc packaged self-tests passed, and the published executable hashes
-match `release.json`. The controller archive includes the watchdog and its
-Windows runtime dependencies. The Bonds and MACalc executables, model
-sources and dependency versions are unchanged from v22.
+**Deployment status:** release `20261109-cache-v24` is active in the central
+pointer since 9 November 2026, 15:20 UTC (built from `f1d486a`). It changes
+the generic Property Stage 2 waiting message from every five seconds to
+every minute. Other stages and the five-minute LTM updates are unchanged.
+The controller, model and MACalc packaged self-tests passed, and the
+published executable hashes match `release.json`. The packaged controller's
+main routine matches the tested source; the Bonds and MACalc executables,
+model sources and dependency versions are unchanged from v23.
 
 Live LTM acceptance remains outstanding; scenario-progress reads and abort
 behaviour have not yet been verified in a live Excel run. Once any active
 run has finished, fully close and reopen Excel so the next button click
-checks the promoted release. To roll back, write `20261109-cache-v22` to the
+checks the promoted release. To roll back, write `20261109-cache-v23` to the
 central `current.txt` as plain ASCII without a trailing line break.
+
+Release `20261109-cache-v23` was active earlier on 9 November 2026. It added
+Property Stage 2 heartbeats, scenario progress when readable, activity
+warnings and the user-controlled time-limit prompt. Its three packaged
+self-tests passed. Its previous rollback target was `20261109-cache-v22`.
 
 Release `20261109-cache-v22` was active earlier on 9 November 2026. It removed
 the requirement for the unused `O. ConcRisk` sheet to exist or contain data
@@ -622,11 +627,10 @@ no CPU activity for 10 minutes.
 If the runner exits but the macro is still waiting after two minutes, check the
 LTM Excel window for an error dialog. These warnings do not stop the run.
 
-The source controller now prints generic `Waiting: Processing` messages
-every minute for Property Stage 2 only, leaving the five-minute LTM updates
-unchanged. Other stages retain their five-second generic waiting interval.
-This console-frequency change is not yet packaged; v23 still uses five
-seconds.
+From release `20261109-cache-v24`, the controller prints generic
+`Waiting: Processing` messages every minute for Property Stage 2 only,
+leaving the five-minute LTM updates unchanged. Other stages retain their
+five-second generic waiting interval.
 
 The time limit is 10 minutes per scenario, with a 30-minute minimum (160
 minutes for 16 scenarios). At the limit, the console asks whether to wait 30
