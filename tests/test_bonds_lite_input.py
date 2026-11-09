@@ -1686,6 +1686,9 @@ def test_packaged_builder_publishes_versioned_central_copy_source(
     monkeypatch.setattr(builder, "build", build_application)
     monkeypatch.setattr(builder, "run", self_test)
     monkeypatch.setattr(
+        builder, "python_environment", lambda python, project: ["3.11 test"]
+    )
+    monkeypatch.setattr(
         builder, "collect_licences",
         lambda python, destination, project: destination.mkdir(parents=True),
     )
@@ -1756,6 +1759,158 @@ def test_packaged_builder_publishes_versioned_central_copy_source(
     }
     assert (release_root / "current.txt").read_bytes() == b"test-local-cache-source"
 
+
+class _BuilderHarness:
+    """Run the release builder repeatedly with fake PyInstaller builds."""
+
+    def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from macalc_batch_entry import PROVENANCE_FILES
+        from tools import build_packaged_stages as builder
+
+        self.builder = builder
+        self.tmp_path = tmp_path
+        self.monkeypatch = monkeypatch
+        self.model_dir = tmp_path / "model source"
+        self.model_dir.mkdir()
+        for name in ("run_bonds_batch.py", "BondsModelHandler.py", "pyBondsHMutils.py"):
+            (self.model_dir / name).write_text(f"# {name}\n", encoding="utf-8")
+        self.macalc_dir = tmp_path / "MACalc Batch"
+        (self.macalc_dir / "LPIcurvestool").mkdir(parents=True)
+        for name in PROVENANCE_FILES:
+            (self.macalc_dir / name).write_text(f"# {name}\n", encoding="utf-8")
+        (self.macalc_dir / "LPIcurvestool" / "LPIcurves.py").write_text(
+            "# helper\n", encoding="utf-8"
+        )
+        self.model_python = tmp_path / "py311" / "python.exe"
+        self.model_python.parent.mkdir()
+        self.model_python.write_bytes(b"model Python sentinel")
+        self.release_root = tmp_path / "central"
+        self.release_root.mkdir()
+        self.environment = ["3.11 test", "numpy==2.0"]
+        self.builds: list[str] = []
+        self.failing_self_test: str | None = None
+        self.release_count = 0
+
+        def build_application(
+            python: Path, entry: Path, name: str, build_root: Path, dist: Path,
+            project: Path, model: Path | None = None, clean: bool = False,
+            **kwargs: Any,
+        ) -> Path:
+            self.builds.append(name)
+            application = dist / name
+            application.mkdir(parents=True)
+            (application / f"{name}.exe").write_text(
+                f"{name} build {len(self.builds)}", encoding="ascii"
+            )
+            return application
+
+        def self_test(command: list[str], cwd: Path, **kwargs: Any) -> str:
+            if self.failing_self_test and command[0].endswith(self.failing_self_test):
+                raise RuntimeError("self-test failed")
+            return "ok"
+
+        monkeypatch.setattr(builder, "build", build_application)
+        monkeypatch.setattr(builder, "run", self_test)
+        monkeypatch.setattr(
+            builder, "python_environment", lambda python, project: self.environment
+        )
+        monkeypatch.setattr(
+            builder, "collect_licences",
+            lambda python, destination, project: destination.mkdir(parents=True),
+        )
+
+    def release(self, *extra: str) -> dict[str, Any]:
+        """Build one release and return its manifest."""
+        self.builds.clear()
+        self.release_count += 1
+        release_id = f"release-{self.release_count}"
+        self.monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "build_packaged_stages",
+                "--model-python", str(self.model_python),
+                "--model-dir", str(self.model_dir),
+                "--macalc-dir", str(self.macalc_dir),
+                "--build-root", str(self.tmp_path / "build cache"),
+                "--release-root", str(self.release_root),
+                "--release-id", release_id,
+                *extra,
+            ],
+        )
+        assert self.builder.main() == 0
+        app = self.release_root / "releases" / release_id / "Bonds Lite App"
+        return json.loads((app / "release.json").read_text(encoding="utf-8"))
+
+
+def test_packaged_builder_reuses_unchanged_model_applications(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _BuilderHarness(tmp_path, monkeypatch)
+    first = harness.release()
+    assert harness.builds == ["BondsLiteController", "BondsLiteModel", "MACalcModel"]
+    assert first["reused_components"] == []
+
+    second = harness.release()
+
+    assert harness.builds == ["BondsLiteController"]
+    assert second["reused_components"] == ["BondsLiteModel", "MACalcModel"]
+    assert second["component_fingerprints"] == first["component_fingerprints"]
+    assert second["model_executable_sha256"] == first["model_executable_sha256"]
+    assert second["macalc_executable_sha256"] == first["macalc_executable_sha256"]
+
+
+@pytest.mark.parametrize(
+    ("change", "rebuilt"),
+    [
+        ("model_source", ["BondsLiteModel"]),
+        ("macalc_helper", ["MACalcModel"]),
+        ("environment", ["BondsLiteModel", "MACalcModel"]),
+        ("corrupt_cache", ["BondsLiteModel"]),
+        ("rebuild_all", ["BondsLiteModel", "MACalcModel"]),
+    ],
+)
+def test_packaged_builder_rebuilds_model_applications_when_inputs_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str, rebuilt: list[str]
+) -> None:
+    harness = _BuilderHarness(tmp_path, monkeypatch)
+    harness.release()
+    extra: tuple[str, ...] = ()
+    if change == "model_source":
+        (harness.model_dir / "BondsModelHandler.py").write_text("# v2\n", encoding="utf-8")
+    elif change == "macalc_helper":
+        (harness.macalc_dir / "LPIcurvestool" / "LPIcurves.py").write_text(
+            "# v2\n", encoding="utf-8"
+        )
+    elif change == "environment":
+        harness.environment = ["3.11 test", "numpy==2.1"]
+    elif change == "corrupt_cache":
+        cached = tmp_path / "build cache" / "components" / "BondsLiteModel" / "app"
+        (cached / "BondsLiteModel.exe").write_text("tampered", encoding="ascii")
+    else:
+        extra = ("--rebuild-all",)
+
+    manifest = harness.release(*extra)
+
+    assert harness.builds == ["BondsLiteController", *rebuilt]
+    assert sorted(manifest["reused_components"]) == sorted(
+        {"BondsLiteModel", "MACalcModel"} - set(rebuilt)
+    )
+
+
+def test_packaged_builder_caches_model_applications_only_after_self_tests_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _BuilderHarness(tmp_path, monkeypatch)
+    harness.failing_self_test = "MACalcModel.exe"
+    with pytest.raises(RuntimeError, match="self-test failed"):
+        harness.release()
+    assert not (tmp_path / "build cache" / "components").exists()
+
+    harness.failing_self_test = None
+    harness.release()
+
+    assert harness.builds == ["BondsLiteController", "BondsLiteModel", "MACalcModel"]
 
 def test_pyinstaller_command_hidden_imports_controller_stages_only(
     tmp_path: Path,

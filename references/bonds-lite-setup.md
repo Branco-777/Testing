@@ -514,6 +514,27 @@ they do not require the external model folder, Python installation or git.
 The controller validates the MACalc executable against the manifest before
 dispatching a packaged stage.
 
+The builder reuses the previous verified `Model` and `MACalc` builds when
+their inputs are unchanged, and rebuilds only the controller. After a build
+passes all three self-tests, it caches each model application under
+`%LOCALAPPDATA%\BondsLiteBuild\components`, with a fingerprint of everything
+that determines it:
+
+- the PyInstaller options
+- the entry script in `src`
+- every `.py` file in `--model-dir` or `--macalc-dir`
+- the model Python version and installed package versions
+
+On the next build, a component with a matching fingerprint and an intact
+executable is copied from the cache. Otherwise it is rebuilt and the cache is
+replaced. The console prints `Reusing unchanged BondsLiteModel build ...`
+when it reuses a component. `release.json` lists the fingerprints under
+`component_fingerprints` and the reused applications under
+`reused_components`. All three self-tests and the source checks still run on
+every build. Pass `--rebuild-all` (or `--clean`) to force a full rebuild.
+The release copy to the central folder is unchanged and still includes every
+application, because the Excel launcher installs whole releases.
+
 Commit, build, promotion and the packaged button run are separate approval
 gates. Build under a new release ID without `--promote`, verify all three
 self-tests, and obtain approval before changing `current.txt`. Release

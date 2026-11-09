@@ -25,6 +25,8 @@ MACALC_SOURCE_NAMES = (
     "calcmp.py",
     "MACalcutils.py",
 )
+COMPONENT_CACHE_DIR = "components"
+EXCLUDED_SOURCE_PARTS = {"__pycache__", ".git", ".venv", "venv", "build", "dist"}
 
 
 def run(
@@ -166,6 +168,91 @@ def build(
     return dist / name
 
 
+def sha256_file(path: Path) -> str:
+    """Return the SHA-256 hex digest of one file."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def python_environment(python: Path, project: Path) -> list[str]:
+    """Describe the interpreter version and every installed distribution."""
+    probe = (
+        "import sys,json,importlib.metadata as m; print(json.dumps([sys.version]+"
+        "sorted(str(d.metadata['Name'])+'=='+str(d.version) for d in m.distributions())))"
+    )
+    return json.loads(run([str(python), "-c", probe], project, timeout=60))
+
+
+def component_fingerprint(
+    python: Path,
+    entry: Path,
+    name: str,
+    project: Path,
+    source_dir: Path,
+    environment: list[str],
+) -> str:
+    """Fingerprint every input that determines a model application build.
+
+    The fingerprint covers the PyInstaller options, the entry script, every
+    Python file in the model source folder and the model interpreter's
+    installed packages, so a cached build is reused only when none changed.
+    """
+    command = pyinstaller_command(
+        python,
+        entry,
+        name,
+        Path("<dist>"),
+        Path("<work>"),
+        Path("<spec>"),
+        project,
+        model=source_dir,
+    )
+    digest = hashlib.sha256()
+    digest.update(json.dumps({"command": command, "environment": environment}).encode())
+    digest.update(sha256_file(entry).encode())
+    for path in sorted(source_dir.rglob("*.py")):
+        relative = path.relative_to(source_dir)
+        if EXCLUDED_SOURCE_PARTS.intersection(relative.parts):
+            continue
+        digest.update(f"{relative.as_posix()}:{sha256_file(path)}".encode())
+    return digest.hexdigest()
+
+
+def reuse_component(
+    build_root: Path, name: str, fingerprint: str, dist: Path
+) -> Path | None:
+    """Copy a previously verified build into ``dist`` if its fingerprint matches."""
+    cache = build_root / COMPONENT_CACHE_DIR / name
+    try:
+        record = json.loads((cache / "component.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    executable = cache / "app" / f"{name}.exe"
+    if (
+        record.get("fingerprint") != fingerprint
+        or not executable.is_file()
+        or sha256_file(executable) != record.get("executable_sha256")
+    ):
+        return None
+    application = dist / name
+    shutil.copytree(cache / "app", application)
+    return application
+
+
+def store_component(
+    build_root: Path, name: str, fingerprint: str, application: Path
+) -> None:
+    """Cache a self-tested build; the record is written last so partial copies are ignored."""
+    cache = build_root / COMPONENT_CACHE_DIR / name
+    if cache.exists():
+        shutil.rmtree(cache)
+    shutil.copytree(application, cache / "app")
+    record = {
+        "fingerprint": fingerprint,
+        "executable_sha256": sha256_file(application / f"{name}.exe"),
+    }
+    (cache / "component.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+
+
 def collect_licences(python: Path, destination: Path, project: Path) -> None:
     """Include available runtime dependency licences alongside the application."""
     probe = (
@@ -205,7 +292,14 @@ def main() -> int:
         "--release-id", default=datetime.now().strftime("%Y%m%d-stages-v1")
     )
     parser.add_argument(
-        "--clean", action="store_true", help="Discard PyInstaller analysis caches"
+        "--clean",
+        action="store_true",
+        help="Discard PyInstaller analysis caches and rebuild every application",
+    )
+    parser.add_argument(
+        "--rebuild-all",
+        action="store_true",
+        help="Rebuild the model and MACalc applications even if their inputs are unchanged",
     )
     parser.add_argument(
         "--promote",
@@ -245,9 +339,53 @@ def main() -> int:
     )
     build_root = build_root.resolve()
     build_root.mkdir(parents=True, exist_ok=True)
+    model_python = options.model_python.resolve(strict=True)
+    environment = python_environment(model_python, project)
+    components = {
+        "BondsLiteModel": (project / "src" / "bonds_lite_model_entry.py", model),
+        "MACalcModel": (project / "src" / "macalc_batch_entry.py", macalc),
+    }
+
+    def fingerprints() -> dict[str, str]:
+        return {
+            name: component_fingerprint(
+                model_python, entry, name, project, source, environment
+            )
+            for name, (entry, source) in components.items()
+        }
+
+    expected_fingerprints = fingerprints()
+    allow_reuse = not (options.clean or options.rebuild_all)
+    reused: list[str] = []
     with tempfile.TemporaryDirectory(prefix="release-stage-", dir=build_root) as stage:
         stage_root = Path(stage)
         dist = stage_root / "dist"
+
+        def model_application(name: str) -> Path:
+            entry, source = components[name]
+            if allow_reuse:
+                application = reuse_component(
+                    build_root, name, expected_fingerprints[name], dist
+                )
+                if application is not None:
+                    print(
+                        f"Reusing unchanged {name} build "
+                        f"({expected_fingerprints[name][:12]})",
+                        flush=True,
+                    )
+                    reused.append(name)
+                    return application
+            return build(
+                model_python,
+                entry,
+                name,
+                build_root,
+                dist,
+                project,
+                model=source,
+                clean=options.clean,
+            )
+
         controller = build(
             options.controller_python.resolve(strict=True),
             project / "tools" / "controller_entry.py",
@@ -257,26 +395,8 @@ def main() -> int:
             project,
             clean=options.clean,
         )
-        model_app = build(
-            options.model_python.resolve(strict=True),
-            project / "src" / "bonds_lite_model_entry.py",
-            "BondsLiteModel",
-            build_root,
-            dist,
-            project,
-            model=model,
-            clean=options.clean,
-        )
-        macalc_app = build(
-            options.model_python.resolve(strict=True),
-            project / "src" / "macalc_batch_entry.py",
-            "MACalcModel",
-            build_root,
-            dist,
-            project,
-            model=macalc,
-            clean=options.clean,
-        )
+        model_app = model_application("BondsLiteModel")
+        macalc_app = model_application("MACalcModel")
         bundle = stage_root / "Bonds Lite App"
         bundle.mkdir()
         shutil.move(str(controller), bundle / "Controller")
@@ -314,11 +434,23 @@ def main() -> int:
             raise RuntimeError(
                 "MACalc sources changed during the build; release not published"
             )
+        if fingerprints() != expected_fingerprints:
+            raise RuntimeError(
+                "Model or MACalc build inputs changed during the build; "
+                "release not published"
+            )
+        for name, folder in (("BondsLiteModel", "Model"), ("MACalcModel", "MACalc")):
+            if name not in reused:
+                store_component(
+                    build_root, name, expected_fingerprints[name], bundle / folder
+                )
         manifest = {
             "release_id": options.release_id,
             "built_utc": datetime.now(timezone.utc).isoformat(),
             "model_source_sha256": hashes,
             "macalc_source_sha256": macalc_hashes,
+            "component_fingerprints": expected_fingerprints,
+            "reused_components": reused,
             "controller_sha256": hashlib.sha256(
                 controller_exe.read_bytes()
             ).hexdigest(),

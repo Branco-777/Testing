@@ -966,3 +966,13 @@ The packaged controller and a new packaged MACalc model app are built, and the r
 - Hard-code the DataMart add-in path — rejected; the path is per-user and could change when the add-in is updated, while the registry entry reflects what normal Excel loads.
 - Checks only, without loading the add-in — rejected; the run would fail every time instead of working.
 **Rationale:** An Excel instance started by automation does not load start-up add-ins. `CalculateFullRebuild` therefore turned every `P. Curves` value into `#NAME?`. LTM discounted with NaN curves, and its pandas total turned NaN PVs into exact zeros, which passed the non-blank output check. In a disposable-copy test, registering the DataMart loader in an automation instance produced numeric curves equal to the cached values after a full rebuild.
+
+### Decision 105: Reuse Unchanged Model And MACalc Builds (2026-11-09)
+**Question:** How can releases that change only controller code be built faster?
+**Decided by:** User requested the builder change, 9 November 2026; the design below was chosen by the agent.
+**Choice:** After all self-tests pass, the builder caches the `Model` and `MACalc` applications locally, with a SHA-256 fingerprint of the PyInstaller options, entry script, every `.py` file in the model source folder (excluding `__pycache__`, `.git`, `venv`, `build` and `dist`), and the model interpreter version and installed packages. A later build reuses a component only if the fingerprint matches and the cached executable hash is intact. It rechecks the fingerprints before publishing. Reuse is automatic; `--rebuild-all` or `--clean` disables it. `release.json` records `component_fingerprints` and `reused_components`. Self-tests, source checks and executable hashes are unchanged.
+**Alternatives considered:**
+- A manual `--controller-only` flag — rejected; it relies on the person building to judge correctly that the models have not changed.
+- Reference shared component folders across releases instead of copying them — rejected; the Excel launcher installs a whole release folder, so it would need workbook VBA changes.
+- Copy the model applications from the previous central release — rejected; that reads about 600 MB from the network, and older manifests have no fingerprint to confirm they match.
+**Rationale:** The model and MACalc builds take most of the PyInstaller time and rarely change. A content fingerprint makes reuse safe without manual judgement, and any input change triggers a rebuild.
