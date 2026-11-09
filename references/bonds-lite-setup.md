@@ -6,7 +6,7 @@ Version 1.3 | 9 November 2026 | Local-cache v24 active; Property Stage 2 safegua
 
 Generate Bonds Lite Input on the Draft workbook's I. Control sheet starts the workflow through a small VBA launcher. Stage 1 prepares two validated inputs, Bonds and MAP, using one template and one captured set of date/entity/stresses. Both must succeed before the run folder becomes eligible for Stage 2. Stage 2 runs the unchanged folder-based Bonds Lite batch against that exact pair.
 
-The colleague deployment uses frozen controller/model executables cached under the current Windows user's LocalAppData. Draft stays in the user's locally synced SharePoint/OneDrive folder; the launcher resolves that user's local Draft path and attaches to the exact open Excel instance. The central release share is checked once at the first button click in each Excel session. Later clicks use the local cache without network access. Release v24 is active and Stage 1 reads its three path controls through workbook names.
+The colleague deployment uses frozen controller/model executables cached under the current Windows user's LocalAppData. Draft stays in the user's locally synced SharePoint/OneDrive folder; the launcher resolves that user's local Draft path and attaches to the exact open Excel instance. The central release share is checked once at the first button click in each Excel session. Later clicks use the local cache without network access. Release v25 is active and Stage 1 reads its three path controls through workbook names.
 
 ## Prerequisites
 
@@ -498,10 +498,10 @@ Use the Python 3.13 controller interpreter for `python`. Set `--caller` to the e
 
 ### Maintainers: package Stage 4
 
-The Stage 4 bundle adds `MACalc\MACalcModel.exe` alongside the existing
-`Controller` and `Model` folders. The builder requires `--macalc-dir` pointing
-to the accepted MACalc Batch working copy, as well as `--model-dir` for Bonds
-Lite. It uses the isolated Python 3.11 model build environment for both models.
+Existing releases include `MACalc\MACalcModel.exe` alongside the `Controller`
+and `Model` folders. The builder requires `--macalc-dir` pointing to the
+accepted MACalc Batch working copy, as well as `--model-dir` for Bonds Lite.
+It uses the isolated Python 3.11 model build environment for both models.
 The model build requirements include `pulp==3.2.2` and `smithwilson==0.2.0`;
 refresh that isolated environment before an approved build. Do not install
 these dependencies into the external MACalc working copy's environment.
@@ -532,15 +532,25 @@ when it reuses a component. `release.json` lists the fingerprints under
 `component_fingerprints` and the reused applications under
 `reused_components`. All three self-tests and the source checks still run on
 every build. Pass `--rebuild-all` (or `--clean`) to force a full rebuild.
-The release copy to the central folder is unchanged and still includes every
-application, because the Excel launcher installs whole releases.
+
+The shared-component release layout has passed local validation but is **not
+published to the central share or promoted**. A local candidate,
+`20261109-shared-validation`, passed all three frozen self-tests and component
+and executable hash checks. The disposable Excel install, reuse and
+copy-failure recovery test passed, and the Draft launcher was updated after a
+backup. The Model application was reused from its verified fingerprint cache.
+The MACalc application retains Numba and the 64-bit Windows CBC solver; it
+omits CBC binaries for other platforms. The central `current.txt` remains
+`20261109-cache-v25`. No financial batch or packaged button acceptance run has
+been performed. Obtain separate approval before publishing or promoting this
+layout.
 
 The builder publishes with `robocopy /MT:16` and then checks that every staged
 file exists in the release with the same size. If the copy fails or is
 incomplete, it deletes the partial release folder and leaves `current.txt`
-unchanged. The copy is limited by network bandwidth (about 1 MB/s measured on
-9 November 2026), so multi-threading saves only about 5%. Expect about
-10 minutes to publish a full 636 MB release.
+unchanged. The initial component publication is still limited by network
+bandwidth (about 1 MB/s measured on 9 November 2026); later releases with
+unchanged model components avoid copying them again.
 
 Commit, build, promotion and the packaged button run are separate approval
 gates. Build under a new release ID without `--promote`, verify all three

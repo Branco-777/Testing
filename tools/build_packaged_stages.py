@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +28,7 @@ MACALC_SOURCE_NAMES = (
 )
 COMPONENT_CACHE_DIR = "components"
 EXCLUDED_SOURCE_PARTS = {"__pycache__", ".git", ".venv", "venv", "build", "dist"}
+MACALC_PACKAGE_POLICY = "windows-x64-cbc-v1"
 
 
 def run(
@@ -168,6 +170,44 @@ def build(
     return dist / name
 
 
+def prune_macalc_solver_binaries(application: Path) -> None:
+    """Keep only the Windows 64-bit CBC solver in the MACalc bundle."""
+    solver_root = (
+        application / "_internal" / "pulp" / "solverdir" / "cbc"
+    )
+    windows_x64_solver = solver_root / "win" / "i64" / "cbc.exe"
+    if not windows_x64_solver.is_file():
+        raise RuntimeError(
+            f"Windows 64-bit CBC solver is missing from {application}"
+        )
+    platforms = list(solver_root.iterdir())
+    for platform in platforms:
+        if not platform.is_dir():
+            continue
+        if platform.name.casefold() == "licenses":
+            continue
+        if platform.name.casefold() != "win":
+            _preserve_solver_licences(platform, solver_root)
+            shutil.rmtree(platform)
+            continue
+        for architecture in platform.iterdir():
+            if architecture.is_dir() and architecture.name.casefold() != "i64":
+                _preserve_solver_licences(architecture, solver_root)
+                shutil.rmtree(architecture)
+
+
+def _preserve_solver_licences(directory: Path, solver_root: Path) -> None:
+    """Keep licence and notice files from pruned solver platforms."""
+    licence_tokens = ("license", "licence", "copying", "notice")
+    for path in directory.rglob("*"):
+        if path.is_file() and any(
+            token in path.name.casefold() for token in licence_tokens
+        ):
+            destination = solver_root / "licenses" / path.relative_to(solver_root)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, destination)
+
+
 def sha256_file(path: Path) -> str:
     """Return the SHA-256 hex digest of one file."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -208,6 +248,8 @@ def component_fingerprint(
     )
     digest = hashlib.sha256()
     digest.update(json.dumps({"command": command, "environment": environment}).encode())
+    if name == "MACalcModel":
+        digest.update(MACALC_PACKAGE_POLICY.encode())
     digest.update(sha256_file(entry).encode())
     for path in sorted(source_dir.rglob("*.py")):
         relative = path.relative_to(source_dir)
@@ -297,6 +339,79 @@ def publish_bundle(bundle: Path, output: Path) -> None:
     except BaseException:
         shutil.rmtree(output.parent, ignore_errors=True)
         raise
+
+
+def publish_component(
+    application: Path,
+    release_root: Path,
+    name: str,
+    fingerprint: str,
+) -> bool:
+    """Publish one immutable component; return whether a verified copy existed."""
+    if name not in {"BondsLiteModel", "MACalcModel"}:
+        raise ValueError(f"Unknown packaged component: {name}")
+    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        raise ValueError(f"Invalid component fingerprint: {fingerprint}")
+    executable = application / f"{name}.exe"
+    if not executable.is_file():
+        raise RuntimeError(f"Packaged component executable is missing: {executable}")
+    executable_hash = sha256_file(executable)
+    component_parent = release_root / "components" / name
+    component_parent.mkdir(parents=True, exist_ok=True)
+    component = component_parent / fingerprint
+    if component.exists():
+        record_path = component / "component.json"
+        marker_path = component / "component.id"
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            marker = marker_path.read_text(encoding="ascii")
+        except (OSError, ValueError) as error:
+            raise RuntimeError(
+                f"Shared component record is missing or invalid: {component}"
+            ) from error
+        published_executable = component / "app" / executable.name
+        if (
+            not isinstance(record, dict)
+            or record.get("name") != name
+            or record.get("fingerprint") != fingerprint
+            or record.get("executable_sha256") != executable_hash
+            or marker != f"{name}={fingerprint}"
+            or not published_executable.is_file()
+            or published_executable.stat().st_size != executable.stat().st_size
+            or sha256_file(published_executable) != executable_hash
+        ):
+            raise RuntimeError(
+                f"Shared component does not match the current build: {component}"
+            )
+        return True
+
+    with tempfile.TemporaryDirectory(
+        prefix=f".{fingerprint}.partial-", dir=component_parent
+    ) as temporary:
+        staging = Path(temporary)
+        publish_bundle(application, staging / "app")
+        if sha256_file(staging / "app" / executable.name) != executable_hash:
+            raise RuntimeError(f"Shared component copy hash mismatch: {name}")
+        record = {
+            "name": name,
+            "fingerprint": fingerprint,
+            "executable_sha256": executable_hash,
+        }
+        (staging / "component.id").write_text(
+            f"{name}={fingerprint}", encoding="ascii"
+        )
+        (staging / "component.json").write_text(
+            json.dumps(record, indent=2), encoding="utf-8"
+        )
+        for attempt in range(5):
+            try:
+                staging.rename(component)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.1 * (attempt + 1))
+    return False
 
 
 def collect_licences(python: Path, destination: Path, project: Path) -> None:
@@ -443,6 +558,7 @@ def main() -> int:
         )
         model_app = model_application("BondsLiteModel")
         macalc_app = model_application("MACalcModel")
+        prune_macalc_solver_binaries(macalc_app)
         bundle = stage_root / "Bonds Lite App"
         bundle.mkdir()
         shutil.move(str(controller), bundle / "Controller")
@@ -490,13 +606,29 @@ def main() -> int:
                 store_component(
                     build_root, name, expected_fingerprints[name], bundle / folder
                 )
+        shared_reuse = {
+            name: publish_component(
+                bundle / folder,
+                release_root,
+                name,
+                expected_fingerprints[name],
+            )
+            for name, folder in (
+                ("BondsLiteModel", "Model"),
+                ("MACalcModel", "MACalc"),
+            )
+        }
         manifest = {
             "release_id": options.release_id,
             "built_utc": datetime.now(timezone.utc).isoformat(),
+            "layout_version": 2,
             "model_source_sha256": hashes,
             "macalc_source_sha256": macalc_hashes,
             "component_fingerprints": expected_fingerprints,
             "reused_components": reused,
+            "shared_components_reused": [
+                name for name, was_reused in shared_reuse.items() if was_reused
+            ],
             "controller_sha256": hashlib.sha256(
                 controller_exe.read_bytes()
             ).hexdigest(),
@@ -506,14 +638,29 @@ def main() -> int:
             "macalc_executable_sha256": hashlib.sha256(
                 macalc_exe.read_bytes()
             ).hexdigest(),
-            "layout": "Controller/BondsLiteController.exe; Model/BondsLiteModel.exe; MACalc/MACalcModel.exe",
-            "prerequisites": "Windows desktop Excel, JRC add-in, macro/executable permissions, scenario access",
+            "platform": "windows-x86_64",
+            "layout": "Controller; content-addressed Model and MACalc components",
+            "prerequisites": (
+                "64-bit Windows, desktop Excel, JRC add-in, "
+                "macro/executable permissions, scenario access"
+            ),
         }
-        (bundle / "release.json").write_text(
+        component_map = (
+            f"model={expected_fingerprints['BondsLiteModel']}\n"
+            f"macalc={expected_fingerprints['MACalcModel']}\n"
+        )
+        release_bundle = stage_root / "Bonds Lite Release"
+        release_bundle.mkdir()
+        shutil.copytree(bundle / "Controller", release_bundle / "Controller")
+        shutil.copytree(bundle / "Licences", release_bundle / "Licences")
+        (release_bundle / "components.txt").write_text(
+            component_map, encoding="ascii"
+        )
+        (release_bundle / "release.json").write_text(
             json.dumps(manifest, indent=2), encoding="utf-8"
         )
         release_parent.mkdir(parents=True)
-        publish_bundle(bundle, output)
+        publish_bundle(release_bundle, output)
     if options.promote:
         release_root.mkdir(parents=True, exist_ok=True)
         pointer_temporary = release_root / f"current-{os.getpid()}.tmp"

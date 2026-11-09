@@ -99,8 +99,7 @@ def _validate_packaged_bundle(
     """Validate the release manifest and executable hashes for one bundle."""
     manifest_path = bundle / "release.json"
     controller = bundle / "Controller" / "BondsLiteController.exe"
-    model = bundle / "Model" / "BondsLiteModel.exe"
-    if not all(path.is_file() for path in (manifest_path, controller, model)):
+    if not manifest_path.is_file() or not controller.is_file():
         raise BondsLiteError(f"Packaged Bonds Lite release is incomplete: {bundle}")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -114,16 +113,23 @@ def _validate_packaged_bundle(
         raise BondsLiteError(
             "Packaged release manifest ID does not match the selected release"
         )
+    model_app = resolve_packaged_component(bundle, "BondsLiteModel", manifest)
     executables = [
         (controller, "controller_sha256"),
-        (model, "model_executable_sha256"),
+        (model_app / "BondsLiteModel.exe", "model_executable_sha256"),
     ]
-    if "macalc_source_sha256" in manifest or "macalc_executable_sha256" in manifest:
-        macalc = bundle / "MACalc" / "MACalcModel.exe"
-        if not macalc.is_file():
-            raise BondsLiteError(f"Packaged MACalc release is incomplete: {bundle}")
-        executables.append((macalc, "macalc_executable_sha256"))
+    component_map_path = bundle / "components.txt"
+    if component_map_path.is_file() or (
+        "macalc_source_sha256" in manifest
+        or "macalc_executable_sha256" in manifest
+    ):
+        macalc_app = resolve_packaged_component(bundle, "MACalcModel", manifest)
+        executables.append(
+            (macalc_app / "MACalcModel.exe", "macalc_executable_sha256")
+        )
     for path, key in executables:
+        if not path.is_file():
+            raise BondsLiteError(f"Packaged release component is missing: {path}")
         expected_hash = manifest.get(key)
         if not isinstance(expected_hash, str) or not re.fullmatch(
             r"[0-9a-f]{64}", expected_hash
@@ -132,6 +138,113 @@ def _validate_packaged_bundle(
         if _file_hash(path) != expected_hash:
             raise BondsLiteError(f"Packaged release hash mismatch: {path.name}")
     return manifest
+
+
+def _read_component_map(bundle: Path) -> dict[str, str] | None:
+    """Read the plain-text component map used by both Python and the VBA launcher."""
+    path = bundle / "components.txt"
+    if not path.is_file():
+        return None
+    try:
+        lines = path.read_text(encoding="ascii").splitlines()
+    except (OSError, UnicodeDecodeError) as error:
+        raise BondsLiteError(f"Cannot read packaged component map: {error}") from error
+    component_map: dict[str, str] = {}
+    for line in lines:
+        if not line or "=" not in line:
+            raise BondsLiteError("Packaged component map contains an invalid entry")
+        key, fingerprint = line.split("=", maxsplit=1)
+        if key not in {"model", "macalc"} or key in component_map:
+            raise BondsLiteError("Packaged component map contains an invalid key")
+        if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            raise BondsLiteError(
+                f"Packaged component map has an invalid {key} fingerprint"
+            )
+        component_map[key] = fingerprint
+    if set(component_map) != {"model", "macalc"}:
+        raise BondsLiteError("Packaged component map is incomplete")
+    return component_map
+
+
+def resolve_packaged_component(
+    bundle: Path,
+    component_name: str,
+    manifest: dict[str, object] | None = None,
+) -> Path:
+    """Resolve one legacy sibling app or content-addressed shared component."""
+    legacy_directories = {
+        "BondsLiteModel": "Model",
+        "MACalcModel": "MACalc",
+    }
+    if component_name not in legacy_directories:
+        raise BondsLiteError(f"Unknown packaged component: {component_name}")
+    component_map = _read_component_map(bundle)
+    if manifest is None:
+        manifest_path = bundle / "release.json"
+        if component_map is None and not manifest_path.is_file():
+            return bundle / legacy_directories[component_name]
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise BondsLiteError(
+                f"Cannot read packaged release manifest: {error}"
+            ) from error
+    if not isinstance(manifest, dict):
+        raise BondsLiteError("Packaged release manifest must be a JSON object")
+    if component_map is None:
+        if manifest.get("layout_version") == 2:
+            raise BondsLiteError("Packaged release component map is missing")
+        return bundle / legacy_directories[component_name]
+
+    role = "model" if component_name == "BondsLiteModel" else "macalc"
+    fingerprints = manifest.get("component_fingerprints")
+    if not isinstance(fingerprints, dict):
+        raise BondsLiteError("Packaged release component fingerprints are missing")
+    fingerprint = component_map[role]
+    if fingerprints.get(component_name) != fingerprint:
+        raise BondsLiteError(
+            f"Packaged component map does not match {component_name} fingerprint"
+        )
+    try:
+        release_root = bundle.parents[2]
+    except IndexError as error:
+        raise BondsLiteError("Packaged release is outside its expected cache layout") from error
+    component_root = (
+        release_root / "components" / component_name / fingerprint
+    )
+    record_path = component_root / "component.json"
+    marker_path = component_root / "component.id"
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise BondsLiteError(
+            f"Packaged {component_name} component record is missing or invalid"
+        ) from error
+    if (
+        not isinstance(record, dict)
+        or record.get("name") != component_name
+        or record.get("fingerprint") != fingerprint
+        or record.get("executable_sha256")
+        != manifest.get(
+            "model_executable_sha256"
+            if component_name == "BondsLiteModel"
+            else "macalc_executable_sha256"
+        )
+    ):
+        raise BondsLiteError(
+            f"Packaged {component_name} component record does not match its release"
+        )
+    try:
+        marker = marker_path.read_text(encoding="ascii")
+    except (OSError, UnicodeDecodeError) as error:
+        raise BondsLiteError(
+            f"Packaged {component_name} component marker is missing or invalid"
+        ) from error
+    if marker != f"{component_name}={fingerprint}":
+        raise BondsLiteError(
+            f"Packaged {component_name} component marker does not match its release"
+        )
+    return component_root / "app"
 
 
 def _user_environment_value(name: str) -> str:
@@ -152,10 +265,13 @@ def load_model_config(caller_path: Path) -> ModelConfig:
     """Resolve per-user model settings without borrowing the controller Python."""
     if getattr(sys, "frozen", False):
         controller = Path(sys.executable).resolve()
-        model = controller.parent.parent / "Model" / "BondsLiteModel.exe"
+        model_app = resolve_packaged_component(
+            controller.parent.parent, "BondsLiteModel"
+        )
+        model = model_app / "BondsLiteModel.exe"
         if not model.is_file():
             raise BondsLiteError(f"Packaged model missing from the local cache: {model}")
-        return ModelConfig(model, model.parent, packaged=True)
+        return ModelConfig(model, model_app, packaged=True)
     executable = resolve_model_python()
     default = (
         Path(caller_path).resolve().parent
@@ -952,10 +1068,16 @@ Private mCurrentLocalBundle As String
 Private Declare PtrSafe Function UrlUnescapeW Lib "shlwapi.dll" ( _
     ByVal source As LongPtr, ByVal destination As LongPtr, _
     ByRef length As Long, ByVal flags As Long) As Long
+Private Declare PtrSafe Function MoveFileExW Lib "kernel32" ( _
+    ByVal source As LongPtr, ByVal destination As LongPtr, _
+    ByVal flags As Long) As Long
 #Else
 Private Declare Function UrlUnescapeW Lib "shlwapi.dll" ( _
     ByVal source As Long, ByVal destination As Long, _
     ByRef length As Long, ByVal flags As Long) As Long
+Private Declare Function MoveFileExW Lib "kernel32" ( _
+    ByVal source As Long, ByVal destination As Long, _
+    ByVal flags As Long) As Long
 #End If
 
 Private Function QuoteArgument(ByVal value As String) As String
@@ -1029,11 +1151,167 @@ Public Function LocalDraftFullName() As String
         "Open Draft from its locally synced OneDrive folder, not Excel in a browser"
 End Function
 
-Private Function CompleteBundle(ByVal folder As String, ByVal filesystem As Object) As Boolean
-    CompleteBundle = filesystem.FileExists(filesystem.BuildPath(folder, "release.json")) _
-        And filesystem.FileExists(filesystem.BuildPath(folder, "Controller\BondsLiteController.exe")) _
-        And filesystem.FileExists(filesystem.BuildPath(folder, "Model\BondsLiteModel.exe"))
+Private Function IsComponentFingerprint(ByVal value As String) As Boolean
+    Dim pattern As Object
+    Set pattern = CreateObject("VBScript.RegExp")
+    pattern.Pattern = "^[0-9a-f]{64}$"
+    IsComponentFingerprint = pattern.Test(value)
 End Function
+
+Private Function ReadComponentMap( _
+    ByVal bundle As String, ByVal filesystem As Object, _
+    ByRef modelFingerprint As String, ByRef macalcFingerprint As String) As Boolean
+    On Error GoTo InvalidMap
+    Dim stream As Object, line As String, key As String, value As String
+    Dim splitAt As Long, modelFound As Boolean, macalcFound As Boolean
+    Set stream = filesystem.OpenTextFile( _
+        filesystem.BuildPath(bundle, "components.txt"), 1, False, 0)
+    Do While Not stream.AtEndOfStream
+        line = Trim$(stream.ReadLine)
+        splitAt = InStr(1, line, "=", vbBinaryCompare)
+        If splitAt < 2 Then GoTo InvalidMap
+        key = Left$(line, splitAt - 1)
+        value = Mid$(line, splitAt + 1)
+        If key = "model" Then
+            If modelFound Or Not IsComponentFingerprint(value) Then GoTo InvalidMap
+            modelFingerprint = value
+            modelFound = True
+        ElseIf key = "macalc" Then
+            If macalcFound Or Not IsComponentFingerprint(value) Then GoTo InvalidMap
+            macalcFingerprint = value
+            macalcFound = True
+        Else
+            GoTo InvalidMap
+        End If
+    Loop
+    stream.Close
+    ReadComponentMap = modelFound And macalcFound
+    Exit Function
+InvalidMap:
+    On Error Resume Next
+    If Not stream Is Nothing Then stream.Close
+    On Error GoTo 0
+    modelFingerprint = ""
+    macalcFingerprint = ""
+    ReadComponentMap = False
+End Function
+
+Private Function CompleteComponent( _
+    ByVal componentRoot As String, ByVal componentName As String, _
+    ByVal fingerprint As String, ByVal filesystem As Object) As Boolean
+    If Not IsComponentFingerprint(fingerprint) Then Exit Function
+    CompleteComponent = CompleteComponentFolder( _
+        filesystem.BuildPath( _
+            filesystem.BuildPath(componentRoot, componentName), fingerprint), _
+        componentName, fingerprint, filesystem)
+End Function
+
+Private Function CompleteComponentFolder( _
+    ByVal componentFolder As String, ByVal componentName As String, _
+    ByVal fingerprint As String, ByVal filesystem As Object) As Boolean
+    On Error GoTo Incomplete
+    Dim markerPath As String
+    Dim executablePath As String, stream As Object, marker As String
+    If Not IsComponentFingerprint(fingerprint) Then Exit Function
+    markerPath = filesystem.BuildPath(componentFolder, "component.id")
+    executablePath = filesystem.BuildPath( _
+        filesystem.BuildPath(componentFolder, "app"), componentName & ".exe")
+    If Not filesystem.FileExists(markerPath) Then Exit Function
+    If Not filesystem.FileExists(executablePath) Then Exit Function
+    Set stream = filesystem.OpenTextFile(markerPath, 1, False, 0)
+    marker = stream.ReadAll
+    stream.Close
+    CompleteComponentFolder = (marker = componentName & "=" & fingerprint)
+    Exit Function
+Incomplete:
+    On Error Resume Next
+    If Not stream Is Nothing Then stream.Close
+    On Error GoTo 0
+    CompleteComponentFolder = False
+End Function
+
+Private Function CompleteBundle( _
+    ByVal folder As String, ByVal filesystem As Object, _
+    ByVal componentRoot As String) As Boolean
+    Dim modelFingerprint As String, macalcFingerprint As String
+    If Not filesystem.FileExists(filesystem.BuildPath(folder, "release.json")) Then Exit Function
+    If Not filesystem.FileExists( _
+            filesystem.BuildPath(folder, "Controller\BondsLiteController.exe")) Then Exit Function
+    If filesystem.FileExists(filesystem.BuildPath(folder, "components.txt")) Then
+        If Not ReadComponentMap( _
+                folder, filesystem, modelFingerprint, macalcFingerprint) Then Exit Function
+        If Not CompleteComponent( _
+                componentRoot, "BondsLiteModel", modelFingerprint, filesystem) Then Exit Function
+        If Not CompleteComponent( _
+                componentRoot, "MACalcModel", macalcFingerprint, filesystem) Then Exit Function
+    ElseIf Not filesystem.FileExists( _
+            filesystem.BuildPath(folder, "Model\BondsLiteModel.exe")) Then
+        Exit Function
+    End If
+    CompleteBundle = True
+End Function
+
+Private Sub EnsureLocalComponent( _
+    ByVal centralComponentRoot As String, ByVal localComponentRoot As String, _
+    ByVal componentName As String, ByVal fingerprint As String, _
+    ByVal filesystem As Object)
+    On Error GoTo CopyFailed
+    Dim source As String, parent As String, destination As String
+    Dim staging As String, operation As String
+    Dim errorNumber As Long, errorMessage As String
+    operation = "validate the central component"
+    source = filesystem.BuildPath( _
+        filesystem.BuildPath(centralComponentRoot, componentName), fingerprint)
+    If Not CompleteComponent(centralComponentRoot, componentName, fingerprint, filesystem) Then
+        Err.Raise vbObjectError + 420, , "The central " & componentName & " component is incomplete"
+    End If
+    parent = filesystem.BuildPath(localComponentRoot, componentName)
+    destination = filesystem.BuildPath(parent, fingerprint)
+    If filesystem.FolderExists(destination) Then
+        operation = "validate the cached component"
+        If Not CompleteComponent(localComponentRoot, componentName, fingerprint, filesystem) Then
+            Err.Raise vbObjectError + 421, , "The local " & componentName & " component is incomplete"
+        End If
+        Exit Sub
+    End If
+    operation = "create the local component folders"
+    If Not filesystem.FolderExists(localComponentRoot) Then
+        filesystem.CreateFolder localComponentRoot
+    End If
+    If Not filesystem.FolderExists(parent) Then filesystem.CreateFolder parent
+    staging = filesystem.BuildPath( _
+        localComponentRoot, componentName & "-" & Left$(fingerprint, 12) & ".partial-" & _
+        Format$(Now, "yyyymmddhhnnss") & "-" & _
+        CStr(CLng(Timer * 1000)))
+    operation = "copy the component to " & staging
+    filesystem.CopyFolder source, staging, False
+    operation = "verify the staged component at " & staging
+    If Not CompleteComponentFolder( _
+            staging, componentName, fingerprint, filesystem) Then
+        Err.Raise vbObjectError + 422, , "The copied " & componentName & " component is incomplete"
+    End If
+    If filesystem.FolderExists(destination) Then
+        operation = "verify the concurrently cached component"
+        If Not CompleteComponent(localComponentRoot, componentName, fingerprint, filesystem) Then
+            Err.Raise vbObjectError + 425, , "The local " & componentName & " component is incomplete"
+        End If
+        filesystem.DeleteFolder staging, True
+    Else
+        operation = "publish the component at " & destination
+        filesystem.MoveFolder staging, destination
+    End If
+    Exit Sub
+CopyFailed:
+    errorNumber = Err.Number
+    errorMessage = operation & ": " & Err.Description
+    On Error Resume Next
+    If Len(staging) > 0 Then
+        If filesystem.FolderExists(staging) Then filesystem.DeleteFolder staging, True
+    End If
+    On Error GoTo 0
+    Err.Raise errorNumber, , _
+        "Unable to stage " & componentName & " from " & source & ": " & errorMessage
+End Sub
 
 Private Function CurrentLocalBundle() As String
     If Len(mCurrentLocalBundle) = 0 Then
@@ -1050,7 +1328,10 @@ Private Function ResolveLocalBundle() As String
     Dim localRoot As String, cacheRoot As String, cacheRelease As String
     Dim cacheBundle As String, localCacheBundle As String
     Dim stagingRelease As String, stagingBundle As String
-    Dim errorNumber As Long, errorMessage As String
+    Dim centralComponentRoot As String, localComponentRoot As String
+    Dim modelFingerprint As String, macalcFingerprint As String
+    Dim operation As String, errorNumber As Long, errorMessage As String
+    operation = "prepare local cache folders"
     Set filesystem = CreateObject("Scripting.FileSystemObject")
     Set shell = CreateObject("WScript.Shell")
     Set pattern = CreateObject("VBScript.RegExp")
@@ -1061,6 +1342,7 @@ Private Function ResolveLocalBundle() As String
     If Not filesystem.FolderExists(cacheRoot) Then filesystem.CreateFolder cacheRoot
     localPointer = filesystem.BuildPath(localRoot, "current.txt")
     If filesystem.FileExists(localPointer) Then
+        operation = "read the local release pointer"
         On Error Resume Next
         Set stream = filesystem.OpenTextFile(localPointer, 1, False, 0)
         localReleaseId = Replace(Replace(Trim$(stream.ReadAll), vbCr, ""), vbLf, "")
@@ -1070,11 +1352,13 @@ Private Function ResolveLocalBundle() As String
         If pattern.Test(localReleaseId) Then
             cacheRelease = filesystem.BuildPath(cacheRoot, localReleaseId)
             localCacheBundle = filesystem.BuildPath(cacheRelease, "Bonds Lite App")
-            If Not CompleteBundle(localCacheBundle, filesystem) Then
+            localComponentRoot = filesystem.BuildPath(localRoot, "components")
+            If Not CompleteBundle(localCacheBundle, filesystem, localComponentRoot) Then
                 localCacheBundle = ""
             End If
         End If
     End If
+    operation = "read the central release pointer"
     On Error GoTo ReleaseUnavailable
     pointerPath = filesystem.BuildPath(PACKAGED_RELEASE_ROOT, "current.txt")
     If Not filesystem.FileExists(pointerPath) Then
@@ -1093,7 +1377,8 @@ Private Function ResolveLocalBundle() As String
     sourceBundle = filesystem.BuildPath( _
         filesystem.BuildPath(filesystem.BuildPath(PACKAGED_RELEASE_ROOT, "releases"), releaseId), _
         "Bonds Lite App")
-    If Not CompleteBundle(sourceBundle, filesystem) Then
+    centralComponentRoot = filesystem.BuildPath(PACKAGED_RELEASE_ROOT, "components")
+    If Not CompleteBundle(sourceBundle, filesystem, centralComponentRoot) Then
         If Len(localCacheBundle) > 0 Then
             Application.StatusBar = "Bonds Lite update unavailable; using cached release " & localReleaseId
             mCurrentLocalBundle = localCacheBundle
@@ -1102,13 +1387,28 @@ Private Function ResolveLocalBundle() As String
         End If
         Err.Raise vbObjectError + 416, , "The selected central Bonds Lite release is incomplete"
     End If
+    On Error GoTo CopyFailed
+    If filesystem.FileExists(filesystem.BuildPath(sourceBundle, "components.txt")) Then
+        If Not ReadComponentMap( _
+                sourceBundle, filesystem, modelFingerprint, macalcFingerprint) Then
+            Err.Raise vbObjectError + 423, , "The selected central Bonds Lite component map is invalid"
+        End If
+        localComponentRoot = filesystem.BuildPath(localRoot, "components")
+        operation = "cache the Bonds Lite Model component"
+        EnsureLocalComponent centralComponentRoot, localComponentRoot, _
+            "BondsLiteModel", modelFingerprint, filesystem
+        operation = "cache the MACalc component"
+        EnsureLocalComponent centralComponentRoot, localComponentRoot, _
+            "MACalcModel", macalcFingerprint, filesystem
+    End If
     cacheRelease = filesystem.BuildPath(cacheRoot, releaseId)
     cacheBundle = filesystem.BuildPath(cacheRelease, "Bonds Lite App")
     If filesystem.FolderExists(cacheRelease) Then
-        If Not CompleteBundle(cacheBundle, filesystem) Then
+        If Not CompleteBundle(cacheBundle, filesystem, localComponentRoot) Then
             Err.Raise vbObjectError + 418, , "The local Bonds Lite cache is incomplete; contact support"
         End If
     Else
+        operation = "create the staged release folder"
         stagingRelease = filesystem.BuildPath( _
             cacheRoot, releaseId & ".partial-" & Format$(Now, "yyyymmddhhnnss") & "-" & _
             CStr(CLng(Timer * 1000)))
@@ -1116,26 +1416,48 @@ Private Function ResolveLocalBundle() As String
         filesystem.CreateFolder stagingRelease
         Application.StatusBar = "Copying Bonds Lite application to local runtime. First use may take a few minutes..."
         DoEvents
-        filesystem.CopyFolder sourceBundle, stagingBundle, False
-        If Not CompleteBundle(stagingBundle, filesystem) Then
+        If filesystem.FileExists(filesystem.BuildPath(sourceBundle, "components.txt")) Then
+            operation = "copy the release controller and metadata"
+            filesystem.CreateFolder stagingBundle
+            filesystem.CopyFolder _
+                filesystem.BuildPath(sourceBundle, "Controller"), _
+                filesystem.BuildPath(stagingBundle, "Controller"), False
+            filesystem.CopyFile _
+                filesystem.BuildPath(sourceBundle, "release.json"), _
+                filesystem.BuildPath(stagingBundle, "release.json"), False
+            filesystem.CopyFile _
+                filesystem.BuildPath(sourceBundle, "components.txt"), _
+                filesystem.BuildPath(stagingBundle, "components.txt"), False
+            If filesystem.FolderExists(filesystem.BuildPath(sourceBundle, "Licences")) Then
+                filesystem.CopyFolder _
+                    filesystem.BuildPath(sourceBundle, "Licences"), _
+                    filesystem.BuildPath(stagingBundle, "Licences"), False
+            End If
+        Else
+            operation = "copy the legacy full release"
+            filesystem.CopyFolder sourceBundle, stagingBundle, False
+        End If
+        If Not CompleteBundle(stagingBundle, filesystem, localComponentRoot) Then
             Err.Raise vbObjectError + 419, , "The copied Bonds Lite application is incomplete"
         End If
+        operation = "publish the staged release folder"
         filesystem.MoveFolder stagingRelease, cacheRelease
     End If
-    On Error GoTo CopyFailed
+    operation = "update the local release pointer"
     pointerTemporary = localPointer & ".tmp"
     Set stream = filesystem.CreateTextFile(pointerTemporary, True, False)
     stream.WriteLine releaseId
     stream.Close
-    If filesystem.FileExists(localPointer) Then filesystem.DeleteFile localPointer, True
-    filesystem.MoveFile pointerTemporary, localPointer
+    If MoveFileExW(StrPtr(pointerTemporary), StrPtr(localPointer), &H1 Or &H8) = 0 Then
+        Err.Raise vbObjectError + 424, , "Cannot update the local Bonds Lite release pointer"
+    End If
     Application.StatusBar = False
     mCurrentLocalBundle = cacheBundle
     ResolveLocalBundle = cacheBundle
     Exit Function
 ReleaseUnavailable:
     errorNumber = Err.Number
-    errorMessage = Err.Description
+    errorMessage = operation & ": " & Err.Description
     On Error Resume Next
     If Len(stagingRelease) > 0 Then
         If filesystem.FolderExists(stagingRelease) Then filesystem.DeleteFolder stagingRelease, True
@@ -1154,7 +1476,7 @@ ReleaseUnavailable:
     Err.Raise errorNumber, , "Unable to read a complete central release and no complete local cache exists: " & errorMessage
 CopyFailed:
     errorNumber = Err.Number
-    errorMessage = Err.Description
+    errorMessage = operation & ": " & Err.Description
     On Error Resume Next
     If Len(stagingRelease) > 0 Then
         If filesystem.FolderExists(stagingRelease) Then filesystem.DeleteFolder stagingRelease, True
@@ -1163,6 +1485,12 @@ CopyFailed:
     On Error GoTo 0
     If Len(pointerTemporary) > 0 Then
         If filesystem.FileExists(pointerTemporary) Then filesystem.DeleteFile pointerTemporary, True
+    End If
+    If Len(localCacheBundle) > 0 Then
+        Application.StatusBar = "Bonds Lite update unavailable; using cached release " & localReleaseId
+        ResolveLocalBundle = localCacheBundle
+        mCurrentLocalBundle = localCacheBundle
+        Exit Function
     End If
     Err.Raise errorNumber, , "Unable to prepare the local Bonds Lite runtime: " & errorMessage
 End Function

@@ -85,12 +85,17 @@ def load_macalc_config(caller_path: Path) -> MacalcConfig:
     """Resolve the per-user model Python and MACalc Batch source folder."""
     if getattr(sys, "frozen", False):
         controller = Path(sys.executable).resolve()
-        executable = controller.parent.parent / "MACalc" / "MACalcModel.exe"
+        bundle = controller.parent.parent
+        try:
+            model_dir = shared.resolve_packaged_component(bundle, "MACalcModel")
+        except shared.BondsLiteError as error:
+            raise StageFourError(str(error)) from error
+        executable = model_dir / "MACalcModel.exe"
         if not executable.is_file():
             raise StageFourError(
                 f"Packaged MACalc model missing from the local cache: {executable}"
             )
-        return MacalcConfig(executable, executable.parent, packaged=True)
+        return MacalcConfig(executable, model_dir, packaged=True)
 
     try:
         python = shared.resolve_model_python()

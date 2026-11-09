@@ -983,3 +983,58 @@ The packaged controller and a new packaged MACalc model app are built, and the r
 **Choice:** Publish with `robocopy /E /MT:16 /R:2 /W:5`, treating exit codes of 8 or above as failure. Then require every staged file to exist in the release with the same size. On any failure, delete the partial release folder before `current.txt` is touched.
 **Alternatives considered:** Keep `shutil.copytree` — rejected; it neither verifies the copy nor removes a partial release, and it was slightly slower.
 **Rationale:** Measured on the 284 MB, 869-file Model application, `shutil.copytree` took 306 s and robocopy plus verification took 288 s. Both ran at about 1 MB/s, so the network bandwidth, not per-file overhead, limits the copy. The speed gain is small, but the verification and clean-up make failed publications safer. Larger savings would need less data to transfer, for example a smaller bundle or releases that share unchanged components. That would require changes to the Excel launcher.
+
+## Agent-made decisions pending user approval
+
+### Decision 107: Limit The Packaged CBC Solver To Supported Windows Architectures (2026-11-09)
+**Question:** Which bundled CBC solver binaries are needed in the Windows MACalc executable?
+**Decided by:** Agent (pending user approval).
+**Choice:** For a packaging experiment, keep Pulp and its Windows 64-bit CBC solver, and omit Linux, macOS and Windows 32-bit solver binaries. Treat 64-bit Windows as the target platform unless the user confirms that 32-bit Windows must remain supported. Do not remove CBC or its licence files.
+**Alternatives considered:**
+- Keep all six platform variants — rejected for the experiment; the application is a Windows desktop executable and the self-test checks the Windows solver.
+- Remove all solver data — rejected; the packaged MACalc self-test requires CBC availability.
+- Keep Windows 32-bit CBC as well — deferred; the build environment and current packaged target are 64-bit, but deployment compatibility must be confirmed before excluding it.
+**Rationale:** The v25 MACalc bundle contains about 34.4 MB of solver binaries; Windows 64-bit CBC is about 4.2 MB. This could save about 30 MB if all supported PCs are 64-bit Windows. Keep this as a gated packaging change until the target architecture is confirmed and the packaged smoke test passes.
+**Superseded by:** Decision 111 confirms 64-bit Windows as the only supported target.
+
+### Decision 108: Evaluate Numba Removal From MACalc Only (2026-11-09)
+**Question:** Can the MACalc bundle omit Numba and llvmlite to reduce package size?
+**Decided by:** Agent (pending user approval).
+**Choice:** Test excluding Numba and llvmlite from the MACalc executable only. Retain them in the Bonds Lite Model executable, which directly uses Numba for a numerical kernel. Do not accept the MACalc exclusion unless its packaged self-test and a representative MACalc regression run pass.
+**Alternatives considered:**
+- Remove Numba from both model executables — rejected; the Bonds Lite Model uses Numba directly.
+- Keep Numba in MACalc without testing exclusion — deferred; the analysed MACalc source has no direct Numba import, while PyInstaller includes it through dependency analysis.
+- Remove it from MACalc based on the self-test alone — rejected; the self-test does not exercise every pandas or model code path.
+**Rationale:** The MACalc bundle contains about 84.5 MB of llvmlite files, and none of its packaged Python source files directly imports Numba. This is a material potential saving, but indirect runtime use must be ruled out with an actual regression run before release.
+**Superseded by:** Decision 111 retains Numba and llvmlite in both model applications.
+
+### Decision 109: Publish Immutable Shared Runtime Components (2026-11-09)
+**Question:** How should unchanged Model and MACalc applications be shared between releases and user caches?
+**Decided by:** User approved implementation on 9 November 2026.
+**Choice:** Implement an immutable, content-addressed component store on the central share and in each user's LocalAppData cache. Keep the controller with each release; have the release manifest reference the Model and MACalc component fingerprints and executable hashes. Copy only missing or changed components into a staging path, verify them, then atomically publish the component and release manifest before updating `current.txt`. Preserve compatibility with existing full-layout releases and the last-known-good local fallback.
+**Alternatives considered:**
+- Continue copying the complete bundle for every release — rejected; a controller-only change still transfers about 636 MB.
+- Use junctions or hard links between the Model and MACalc `_internal` folders — deferred; the two applications have different `base_library.zip` files and the current launcher copies folders, so this needs a separate runtime-layout proof.
+- Reuse components based only on the release ID or executable filename — rejected; component reuse needs explicit fingerprint and hash validation.
+**Rationale:** The current launcher copies the entire release to a versioned local folder, while both frozen entrypoints find sibling applications relative to the controller. A manifest-backed component cache can reduce a controller-only release from about 636 MB to about 33 MB, but requires coordinated changes to the builder, VBA launcher and Python path resolvers.
+
+### Decision 110: Keep Real Model Runs And Promotion Outside This Implementation Scope (2026-11-09)
+**Question:** Which release and live-run gates apply while reducing package size and changing the component cache?
+**Decided by:** Agent (pending user approval).
+**Choice:** Validate with unit tests, packaged self-tests, disposable release trees and hash/transfer measurements. Do not run a real financial batch or promote a release as part of implementation unless the user separately approves those actions. Keep v25 as the active release until a new release is approved.
+**Alternatives considered:**
+- Promote immediately after local tests — rejected; the release changes both packaging content and the launcher/cache contract.
+- Run a real MACalc financial batch without separate approval — rejected; it has operational and business-data effects beyond packaging validation.
+- Rely only on unit tests for the cache changes — rejected; copy, fallback and VBA behaviour need opt-in Excel integration checks on disposable workbooks.
+**Rationale:** A failed packaging trim can affect numerical execution, and a shared-component release changes user installation and rollback behaviour. Build and live acceptance gates should remain explicit and separate.
+
+## User-approved decisions
+
+### Decision 111: Retain Numba And Target 64-bit Windows (2026-11-09)
+**Question:** Should the package optimisation remove Numba from MACalc, and must 32-bit Windows remain supported?
+**Decided by:** User, 9 November 2026.
+**Choice:** Keep Numba and llvmlite in both the MACalc and Bonds Lite Model bundles; do not pursue the MACalc Numba exclusion. Support 64-bit Windows only. The packaging work may omit CBC solver binaries for other platforms while retaining the Windows 64-bit solver, Pulp and their required licence files. Verify the retained solver in the packaged runtime. This supersedes Decisions 107 and 108.
+**Alternatives considered:**
+- Exclude Numba and llvmlite from MACalc — not chosen by the user.
+- Retain CBC binaries for 32-bit Windows, Linux and macOS — not needed for the confirmed 64-bit Windows target.
+**Rationale:** The user chose to leave Numba in place and confirmed that 64-bit Windows can be the only supported target. The remaining solver trim avoids unused platform binaries without changing the model's Numba dependencies.

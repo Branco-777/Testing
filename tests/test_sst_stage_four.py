@@ -849,6 +849,103 @@ def test_packaged_macalc_config_resolves_sibling_application_and_rejects_missing
         stage_four.load_macalc_config(tmp_path / "Draft.xlsm")
 
 
+def test_packaged_macalc_config_resolves_shared_component(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hashlib
+    import json
+
+    stage_four = _stage_four()
+    release_root = tmp_path / "release source"
+    bundle = (
+        release_root
+        / "releases"
+        / "shared-release"
+        / "Bonds Lite App"
+    )
+    controller = bundle / "Controller" / "BondsLiteController.exe"
+    controller.parent.mkdir(parents=True)
+    controller.write_bytes(b"controller")
+    macalc_fingerprint = "b" * 64
+    component = (
+        release_root
+        / "components"
+        / "MACalcModel"
+        / macalc_fingerprint
+    )
+    app = component / "app"
+    app.mkdir(parents=True)
+    macalc = app / "MACalcModel.exe"
+    macalc.write_bytes(b"MACalc model")
+    macalc_hash = hashlib.sha256(macalc.read_bytes()).hexdigest()
+    (component / "component.id").write_text(
+        f"MACalcModel={macalc_fingerprint}", encoding="ascii"
+    )
+    (component / "component.json").write_text(
+        json.dumps(
+            {
+                "name": "MACalcModel",
+                "fingerprint": macalc_fingerprint,
+                "executable_sha256": macalc_hash,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (bundle / "components.txt").write_text(
+        f"model={'a' * 64}\nmacalc={macalc_fingerprint}\n",
+        encoding="ascii",
+    )
+    model_fingerprint = "a" * 64
+    model_component = (
+        release_root
+        / "components"
+        / "BondsLiteModel"
+        / model_fingerprint
+    )
+    model_app = model_component / "app"
+    model_app.mkdir(parents=True)
+    model_exe = model_app / "BondsLiteModel.exe"
+    model_exe.write_bytes(b"model")
+    model_hash = hashlib.sha256(model_exe.read_bytes()).hexdigest()
+    (model_component / "component.id").write_text(
+        f"BondsLiteModel={model_fingerprint}", encoding="ascii"
+    )
+    (model_component / "component.json").write_text(
+        json.dumps(
+            {
+                "name": "BondsLiteModel",
+                "fingerprint": model_fingerprint,
+                "executable_sha256": model_hash,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (bundle / "release.json").write_text(
+        json.dumps(
+            {
+                "release_id": "shared-release",
+                "layout_version": 2,
+                "component_fingerprints": {
+                    "BondsLiteModel": model_fingerprint,
+                    "MACalcModel": macalc_fingerprint,
+                },
+                "model_executable_sha256": model_hash,
+                "macalc_executable_sha256": macalc_hash,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(stage_four.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(stage_four.sys, "executable", str(controller))
+
+    config = stage_four.load_macalc_config(tmp_path / "Draft.xlsm")
+
+    assert config.python_executable == macalc.resolve()
+    assert config.model_dir == app.resolve()
+    assert config.packaged is True
+
+
 def test_stage_four_audit_names_are_confined_to_stage_four_fields() -> None:
     stage_four = _stage_four()
 

@@ -1498,6 +1498,63 @@ def _create_packaged_release(
     return bundle
 
 
+def _create_shared_component_release(
+    release_root: Path, release_id: str = "20261109-shared-components-v1",
+) -> Path:
+    """Create a release with components in the shared content-addressed store."""
+    import hashlib
+
+    bundle = release_root / "releases" / release_id / "Bonds Lite App"
+    controller = bundle / "Controller" / "BondsLiteController.exe"
+    controller.parent.mkdir(parents=True)
+    controller.write_bytes(b"controller executable sentinel")
+    fingerprints = {
+        "BondsLiteModel": "a" * 64,
+        "MACalcModel": "b" * 64,
+    }
+    executable_hashes: dict[str, str] = {}
+    for name, fingerprint in fingerprints.items():
+        executable_name = f"{name}.exe"
+        component = release_root / "components" / name / fingerprint
+        application = component / "app"
+        application.mkdir(parents=True)
+        executable = application / executable_name
+        executable.write_bytes(f"{name} executable sentinel".encode("ascii"))
+        executable_hashes[name] = hashlib.sha256(executable.read_bytes()).hexdigest()
+        (component / "component.id").write_text(
+            f"{name}={fingerprint}", encoding="ascii"
+        )
+        (component / "component.json").write_text(
+            json.dumps(
+                {
+                    "name": name,
+                    "fingerprint": fingerprint,
+                    "executable_sha256": executable_hashes[name],
+                }
+            ),
+            encoding="utf-8",
+        )
+    component_map = (
+        f"model={fingerprints['BondsLiteModel']}\n"
+        f"macalc={fingerprints['MACalcModel']}\n"
+    )
+    (bundle / "components.txt").write_text(component_map, encoding="ascii")
+    manifest = {
+        "release_id": release_id,
+        "built_utc": "2026-11-09T00:00:00+00:00",
+        "layout_version": 2,
+        "controller_sha256": hashlib.sha256(controller.read_bytes()).hexdigest(),
+        "model_executable_sha256": executable_hashes["BondsLiteModel"],
+        "macalc_executable_sha256": executable_hashes["MACalcModel"],
+        "component_fingerprints": fingerprints,
+        "layout": "Controller; content-addressed Model and MACalc components",
+    }
+    (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8")
+    release_root.mkdir(parents=True, exist_ok=True)
+    (release_root / "current.txt").write_text(release_id, encoding="utf-8")
+    return bundle
+
+
 def test_validate_packaged_bundle_checks_local_manifest_and_executable_hashes(
     tmp_path: Path,
 ) -> None:
@@ -1511,6 +1568,37 @@ def test_validate_packaged_bundle_checks_local_manifest_and_executable_hashes(
     model.write_bytes(b"modified model fixture")
     with pytest.raises(BondsLiteError, match=r"(?i)hash mismatch"):
         workflow._validate_packaged_bundle(bundle, "20261030-stages-v1")
+
+
+def test_validate_packaged_bundle_accepts_legacy_build_fingerprints(
+    tmp_path: Path,
+) -> None:
+    import hashlib
+
+    import bonds_lite_input as workflow
+
+    bundle = _create_packaged_release(tmp_path / "release source")
+    macalc = bundle / "MACalc" / "MACalcModel.exe"
+    macalc.parent.mkdir()
+    macalc.write_bytes(b"legacy MACalc")
+    manifest_path = bundle / "release.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["component_fingerprints"] = {
+        "BondsLiteModel": "a" * 64,
+        "MACalcModel": "b" * 64,
+    }
+    manifest["macalc_executable_sha256"] = hashlib.sha256(
+        macalc.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert workflow._validate_packaged_bundle(bundle) == manifest
+    assert workflow.resolve_packaged_component(bundle, "BondsLiteModel") == (
+        bundle / "Model"
+    )
+    assert workflow.resolve_packaged_component(bundle, "MACalcModel") == (
+        bundle / "MACalc"
+    )
 
 
 @pytest.mark.parametrize("state", ["valid", "missing", "tampered"])
@@ -1569,6 +1657,101 @@ def test_validate_packaged_bundle_rejects_invalid_optional_macalc_digest(
         workflow._validate_packaged_bundle(bundle)
 
 
+def test_validate_packaged_bundle_checks_shared_component_manifest_and_hashes(
+    tmp_path: Path,
+) -> None:
+    import bonds_lite_input as workflow
+
+    bundle = _create_shared_component_release(tmp_path / "release source")
+
+    manifest = workflow._validate_packaged_bundle(
+        bundle, "20261109-shared-components-v1"
+    )
+
+    assert manifest["release_id"] == "20261109-shared-components-v1"
+    model = workflow.resolve_packaged_component(bundle, "BondsLiteModel")
+    macalc = workflow.resolve_packaged_component(bundle, "MACalcModel")
+    assert model == (
+        bundle.parents[2]
+        / "components"
+        / "BondsLiteModel"
+        / ("a" * 64)
+        / "app"
+    )
+    assert macalc == (
+        bundle.parents[2]
+        / "components"
+        / "MACalcModel"
+        / ("b" * 64)
+        / "app"
+    )
+
+    (macalc / "MACalcModel.exe").write_bytes(b"tampered MACalc")
+    with pytest.raises(BondsLiteError, match=r"(?i)hash mismatch"):
+        workflow._validate_packaged_bundle(bundle)
+
+
+def test_validate_shared_bundle_rejects_a_missing_component_map(
+    tmp_path: Path,
+) -> None:
+    import bonds_lite_input as workflow
+
+    bundle = _create_shared_component_release(tmp_path / "release source")
+    (bundle / "components.txt").unlink()
+
+    with pytest.raises(BondsLiteError, match=r"(?i)component map.*missing"):
+        workflow._validate_packaged_bundle(bundle)
+
+
+@pytest.mark.parametrize(
+    "component_map",
+    [
+        "model=../outside\nmacalc=" + "b" * 64 + "\n",
+        "model=" + "a" * 64 + "\nmacalc=" + "b" * 63 + "\n",
+        "model=" + "a" * 64 + "\nmodel=" + "a" * 64 + "\n",
+    ],
+)
+def test_validate_packaged_bundle_rejects_invalid_shared_component_map(
+    tmp_path: Path, component_map: str,
+) -> None:
+    import bonds_lite_input as workflow
+
+    bundle = _create_shared_component_release(tmp_path / "release source")
+    (bundle / "components.txt").write_text(component_map, encoding="ascii")
+
+    with pytest.raises(BondsLiteError, match=r"(?i)component"):
+        workflow._validate_packaged_bundle(bundle)
+
+
+def test_load_model_config_resolves_shared_component_without_user_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bonds_lite_input as workflow
+
+    bundle = _create_shared_component_release(tmp_path / "release source")
+    controller = bundle / "Controller" / "BondsLiteController.exe"
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(controller))
+    monkeypatch.setenv("BONDS_LITE_MODEL_PYTHON", "not-used.exe")
+    monkeypatch.setattr(
+        workflow,
+        "_user_environment_value",
+        lambda name: pytest.fail("Packaged mode must not read user Python settings"),
+    )
+
+    config = workflow.load_model_config(tmp_path / "Draft.xlsm")
+
+    assert config.python_executable == (
+        bundle.parents[2]
+        / "components"
+        / "BondsLiteModel"
+        / ("a" * 64)
+        / "app"
+        / "BondsLiteModel.exe"
+    )
+    assert config.packaged is True
+
+
 def test_packaged_launcher_uses_release_only_as_copy_source_and_launches_cache() -> None:
     import bonds_lite_input as workflow
 
@@ -1579,6 +1762,16 @@ def test_packaged_launcher_uses_release_only_as_copy_source_and_launches_cache()
         'Replace(Replace(Trim$(stream.ReadAll), vbCr, ""), vbLf, "")'
     ) == 2
     assert "CopyFolder" in launcher
+    assert "components.txt" in launcher
+    assert re.search(r'(?i)BuildPath\(localRoot, "components"\)', launcher)
+    assert "EnsureLocalComponent" in launcher
+    assert "component.id" in launcher
+    assert "MoveFileExW" in launcher
+    assert (
+        'Else\n            operation = "copy the legacy full release"\n'
+        "            filesystem.CopyFolder sourceBundle, stagingBundle, False\n"
+        "        End If"
+    ) in launcher
     assert "Bonds Lite App" in launcher
     assert re.search(r"(?i)Controller\\BondsLiteController\.exe", compact)
     assert "LOCALAPPDATA" in launcher.upper()
@@ -1611,6 +1804,78 @@ def test_packaged_launcher_checks_central_pointer_once_per_excel_session() -> No
     assert "ResolveLocalBundle(True)" not in launcher
     assert "LOCALAPPDATA" in launcher.upper()
     assert "Copying Bonds Lite application" in launcher
+
+
+def test_packaged_launcher_component_folder_returns_its_own_result() -> None:
+    import bonds_lite_input as workflow
+
+    match = re.search(
+        r"(?ims)^Private Function CompleteComponentFolder\(.*?^End Function$",
+        workflow.PACKAGED_VBA_LAUNCHER,
+    )
+    assert match is not None
+    body = match.group()
+    assert re.search(r"(?im)^\s*CompleteComponentFolder\s*=\s*\(marker", body)
+    assert re.search(r"(?im)^\s*CompleteComponentFolder\s*=\s*False\s*$", body)
+    assert not re.search(r"(?im)^\s*CompleteComponent\s*=", body)
+
+
+def test_packaged_launcher_stages_legacy_and_shared_copies_safely() -> None:
+    import bonds_lite_input as workflow
+
+    installation = workflow.PACKAGED_VBA_LAUNCHER.split(
+        "filesystem.CreateFolder stagingRelease", 1
+    )[1].split("If Not CompleteBundle(stagingBundle", 1)[0]
+    before_shared, shared_and_legacy = installation.split(
+        'If filesystem.FileExists(filesystem.BuildPath(sourceBundle, "components.txt")) Then',
+        1,
+    )
+    shared, legacy = shared_and_legacy.split("\n        Else\n", 1)
+    assert "filesystem.CreateFolder stagingBundle" not in before_shared
+    assert "filesystem.CreateFolder stagingBundle" in shared
+    assert "filesystem.CopyFolder sourceBundle, stagingBundle, False" in legacy
+    compact = re.sub(r"\s*_\s*\r?\n\s*", " ", shared)
+    compact = re.sub(r"\s+", " ", compact)
+    for filename in ("release.json", "components.txt"):
+        assert (
+            f'filesystem.CopyFile filesystem.BuildPath(sourceBundle, "{filename}"), '
+            f'filesystem.BuildPath(stagingBundle, "{filename}"), False'
+        ) in compact
+
+
+def test_packaged_launcher_uses_a_short_staging_path_for_shared_components() -> None:
+    import bonds_lite_input as workflow
+
+    component_copy = workflow.PACKAGED_VBA_LAUNCHER.split(
+        "Private Sub EnsureLocalComponent(", 1
+    )[1].split("\nEnd Sub", 1)[0]
+    component_copy = re.sub(r"\s*_\s*\r?\n\s*", " ", component_copy)
+    assert re.search(
+        r"(?is)staging\s*=\s*filesystem\.BuildPath\(\s*"
+        r"localComponentRoot,\s*componentName\s*&",
+        component_copy,
+    )
+
+
+def test_packaged_launcher_routes_local_install_errors_to_cache_recovery() -> None:
+    import bonds_lite_input as workflow
+
+    resolve = workflow.PACKAGED_VBA_LAUNCHER.split(
+        "Private Function ResolveLocalBundle()", 1
+    )[1].split("\nEnd Function", 1)[0]
+    source_validation = resolve.index("If Not CompleteBundle(sourceBundle")
+    cache_copy_handler = resolve.index("On Error GoTo CopyFailed", source_validation)
+    component_copy = resolve.index("EnsureLocalComponent centralComponentRoot")
+    release_copy = resolve.index("filesystem.CreateFolder stagingRelease")
+    assert cache_copy_handler < component_copy
+    assert cache_copy_handler < release_copy
+    assert "Unable to prepare the local Bonds Lite runtime: " in resolve
+    assert "errorMessage = operation & \": \" & Err.Description" in resolve
+    component_copy = workflow.PACKAGED_VBA_LAUNCHER.split(
+        "Private Sub EnsureLocalComponent(", 1
+    )[1].split("\nEnd Sub", 1)[0]
+    assert 'operation = "copy the component to " & staging' in component_copy
+    assert "errorMessage = operation & \": \" & Err.Description" in component_copy
 
 
 @pytest.mark.parametrize(
@@ -1673,6 +1938,19 @@ def test_packaged_builder_publishes_versioned_central_copy_source(
         application = dist / name
         application.mkdir(parents=True)
         (application / f"{name}.exe").write_bytes(f"{name} executable".encode("ascii"))
+        if name == "MACalcModel":
+            solver = (
+                application
+                / "_internal"
+                / "pulp"
+                / "solverdir"
+                / "cbc"
+                / "win"
+                / "i64"
+                / "cbc.exe"
+            )
+            solver.parent.mkdir(parents=True)
+            solver.write_bytes(b"windows x64 CBC")
         if name == "MACalcModel" and changed_macalc_source is not None:
             (macalc_dir / changed_macalc_source).write_text(
                 "# changed during build\n", encoding="utf-8"
@@ -1726,8 +2004,28 @@ def test_packaged_builder_publishes_versioned_central_copy_source(
 
     assert (release / "release.json").is_file()
     assert (release / "Controller" / "BondsLiteController.exe").is_file()
-    assert (release / "Model" / "BondsLiteModel.exe").is_file()
-    macalc_exe = release / "MACalc" / "MACalcModel.exe"
+    assert not (release / "Model").exists()
+    assert not (release / "MACalc").exists()
+    manifest = json.loads((release / "release.json").read_text(encoding="utf-8"))
+    assert manifest["layout_version"] == 2
+    assert (release / "components.txt").is_file()
+    model_exe = (
+        release_root
+        / "components"
+        / "BondsLiteModel"
+        / manifest["component_fingerprints"]["BondsLiteModel"]
+        / "app"
+        / "BondsLiteModel.exe"
+    )
+    macalc_exe = (
+        release_root
+        / "components"
+        / "MACalcModel"
+        / manifest["component_fingerprints"]["MACalcModel"]
+        / "app"
+        / "MACalcModel.exe"
+    )
+    assert model_exe.is_file()
     assert macalc_exe.is_file()
     assert [call["name"] for call in builds] == [
         "BondsLiteController",
@@ -1746,18 +2044,15 @@ def test_packaged_builder_publishes_versioned_central_copy_source(
         ("MACalc", "MACalcModel.exe", ("--self-test",)),
     }
     assert all(cwd.name == "Bonds Lite App" for _, cwd in self_tests)
-    manifest = json.loads((release / "release.json").read_text(encoding="utf-8"))
     assert len(macalc_hashes) == 6
     assert manifest["macalc_source_sha256"] == macalc_hashes
     assert (
         manifest["macalc_executable_sha256"]
         == hashlib.sha256(macalc_exe.read_bytes()).hexdigest()
     )
-    assert set(manifest["layout"].split("; ")) == {
-        "Controller/BondsLiteController.exe",
-        "Model/BondsLiteModel.exe",
-        "MACalc/MACalcModel.exe",
-    }
+    assert manifest["layout"] == (
+        "Controller; content-addressed Model and MACalc components"
+    )
     assert (release_root / "current.txt").read_bytes() == b"test-local-cache-source"
 
 
@@ -1789,6 +2084,7 @@ class _BuilderHarness:
         self.release_root.mkdir()
         self.environment = ["3.11 test", "numpy==2.0"]
         self.builds: list[str] = []
+        self.publications: list[tuple[Path, Path]] = []
         self.failing_self_test: str | None = None
         self.release_count = 0
 
@@ -1803,6 +2099,19 @@ class _BuilderHarness:
             (application / f"{name}.exe").write_text(
                 f"{name} build {len(self.builds)}", encoding="ascii"
             )
+            if name == "MACalcModel":
+                solver = (
+                    application
+                    / "_internal"
+                    / "pulp"
+                    / "solverdir"
+                    / "cbc"
+                    / "win"
+                    / "i64"
+                    / "cbc.exe"
+                )
+                solver.parent.mkdir(parents=True)
+                solver.write_bytes(b"windows x64 CBC")
             return application
 
         def self_test(command: list[str], cwd: Path, **kwargs: Any) -> str:
@@ -1812,6 +2121,13 @@ class _BuilderHarness:
 
         monkeypatch.setattr(builder, "build", build_application)
         monkeypatch.setattr(builder, "run", self_test)
+        original_publish_bundle = builder.publish_bundle
+
+        def publish_bundle(source: Path, destination: Path) -> None:
+            self.publications.append((source, destination))
+            original_publish_bundle(source, destination)
+
+        monkeypatch.setattr(builder, "publish_bundle", publish_bundle)
         monkeypatch.setattr(
             builder, "python_environment", lambda python, project: self.environment
         )
@@ -1823,6 +2139,7 @@ class _BuilderHarness:
     def release(self, *extra: str) -> dict[str, Any]:
         """Build one release and return its manifest."""
         self.builds.clear()
+        self.publications.clear()
         self.release_count += 1
         release_id = f"release-{self.release_count}"
         self.monkeypatch.setattr(
@@ -1859,6 +2176,15 @@ def test_packaged_builder_reuses_unchanged_model_applications(
     assert second["component_fingerprints"] == first["component_fingerprints"]
     assert second["model_executable_sha256"] == first["model_executable_sha256"]
     assert second["macalc_executable_sha256"] == first["macalc_executable_sha256"]
+    assert len(harness.publications) == 1
+    release = (
+        harness.release_root
+        / "releases"
+        / "release-2"
+        / "Bonds Lite App"
+    )
+    assert not (release / "Model").exists()
+    assert not (release / "MACalc").exists()
 
 
 @pytest.mark.parametrize(
@@ -1912,6 +2238,189 @@ def test_packaged_builder_caches_model_applications_only_after_self_tests_pass(
     harness.release()
 
     assert harness.builds == ["BondsLiteController", "BondsLiteModel", "MACalcModel"]
+
+
+def test_prune_macalc_solver_binaries_keeps_only_windows_x64_and_licences(
+    tmp_path: Path,
+) -> None:
+    from tools import build_packaged_stages as builder
+
+    application = tmp_path / "MACalcModel"
+    solver_root = application / "_internal" / "pulp" / "solverdir" / "cbc"
+    retained = solver_root / "win" / "i64" / "cbc.exe"
+    retained.parent.mkdir(parents=True)
+    retained.write_bytes(b"windows x64 solver")
+    (solver_root / "win" / "i64" / "coin-license.txt").write_text(
+        "solver licence", encoding="utf-8"
+    )
+    (solver_root / "win" / "i32" / "cbc.exe").parent.mkdir(parents=True)
+    (solver_root / "win" / "i32" / "cbc.exe").write_bytes(b"windows x86 solver")
+    (solver_root / "win" / "i32" / "COPYING.txt").write_text(
+        "Windows CBC terms", encoding="utf-8"
+    )
+    for platform in ("linux", "osx"):
+        binary = solver_root / platform / "i64" / "cbc"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(f"{platform} solver".encode("ascii"))
+        (binary.parent / "LICENSE.txt").write_text(
+            f"{platform} CBC terms", encoding="utf-8"
+        )
+    licence = application / "_internal" / "pulp" / "LICENSE"
+    licence.write_text("Pulp licence", encoding="utf-8")
+
+    builder.prune_macalc_solver_binaries(application)
+
+    assert retained.is_file()
+    assert (retained.parent / "coin-license.txt").is_file()
+    assert (
+        solver_root / "licenses" / "win" / "i32" / "COPYING.txt"
+    ).is_file()
+    assert (
+        solver_root / "licenses" / "linux" / "i64" / "LICENSE.txt"
+    ).is_file()
+    assert (
+        solver_root / "licenses" / "osx" / "i64" / "LICENSE.txt"
+    ).is_file()
+    assert licence.is_file()
+    assert sorted(path.relative_to(solver_root).as_posix() for path in solver_root.rglob("cbc*")) == [
+        "win/i64/cbc.exe"
+    ]
+
+
+def test_prune_macalc_solver_binaries_rejects_missing_windows_x64_solver(
+    tmp_path: Path,
+) -> None:
+    from tools import build_packaged_stages as builder
+
+    application = tmp_path / "MACalcModel"
+    solver_root = application / "_internal" / "pulp" / "solverdir" / "cbc"
+    (solver_root / "win" / "i32").mkdir(parents=True)
+
+    with pytest.raises(RuntimeError, match=r"(?i)Windows 64-bit CBC.*missing"):
+        builder.prune_macalc_solver_binaries(application)
+
+
+def test_publish_component_reuses_only_a_matching_verified_component(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hashlib
+
+    from tools import build_packaged_stages as builder
+
+    application = tmp_path / "built" / "BondsLiteModel"
+    application.mkdir(parents=True)
+    executable = application / "BondsLiteModel.exe"
+    executable.write_bytes(b"model executable")
+    fingerprint = "a" * 64
+    release_root = tmp_path / "central"
+
+    assert not builder.publish_component(
+        application, release_root, "BondsLiteModel", fingerprint
+    )
+    component = (
+        release_root / "components" / "BondsLiteModel" / fingerprint
+    )
+    record = json.loads((component / "component.json").read_text(encoding="utf-8"))
+    assert (component / "component.id").read_text(encoding="ascii") == (
+        f"BondsLiteModel={fingerprint}"
+    )
+    assert record["fingerprint"] == fingerprint
+    assert record["executable_sha256"] == hashlib.sha256(
+        (component / "app" / executable.name).read_bytes()
+    ).hexdigest()
+
+    monkeypatch.setattr(
+        builder,
+        "publish_bundle",
+        lambda *args, **kwargs: pytest.fail("Matching shared component was copied"),
+    )
+    assert builder.publish_component(
+        application, release_root, "BondsLiteModel", fingerprint
+    )
+
+    published_executable = component / "app" / executable.name
+    published_executable.write_bytes(b"x" * executable.stat().st_size)
+    with pytest.raises(RuntimeError, match=r"(?i)component.*does not match"):
+        builder.publish_component(
+            application, release_root, "BondsLiteModel", fingerprint
+        )
+    published_executable.write_bytes(executable.read_bytes())
+
+    (component / "component.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(RuntimeError, match=r"(?i)component.*does not match"):
+        builder.publish_component(
+            application, release_root, "BondsLiteModel", fingerprint
+        )
+
+
+def test_publish_component_rejects_corrupted_executable_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tools import build_packaged_stages as builder
+
+    application = tmp_path / "built" / "BondsLiteModel"
+    application.mkdir(parents=True)
+    executable = application / "BondsLiteModel.exe"
+    executable.write_bytes(b"model executable")
+    release_root = tmp_path / "central"
+    fingerprint = "a" * 64
+
+    def corrupt_copy(source: Path, destination: Path) -> None:
+        shutil.copytree(source, destination)
+        (destination / executable.name).write_bytes(b"x" * executable.stat().st_size)
+
+    monkeypatch.setattr(builder, "publish_bundle", corrupt_copy)
+
+    with pytest.raises(RuntimeError, match=r"(?i)component copy hash mismatch"):
+        builder.publish_component(
+            application, release_root, "BondsLiteModel", fingerprint
+        )
+    component_parent = release_root / "components" / "BondsLiteModel"
+    assert not (component_parent / fingerprint).exists()
+    assert not list(component_parent.iterdir())
+
+
+def test_publish_component_retries_transient_windows_rename_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import shutil
+
+    from tools import build_packaged_stages as builder
+
+    application = tmp_path / "built" / "BondsLiteModel"
+    application.mkdir(parents=True)
+    (application / "BondsLiteModel.exe").write_bytes(b"model executable")
+    release_root = tmp_path / "central"
+    fingerprint = "a" * 64
+    rename_attempts = 0
+    original_rename = Path.rename
+    monkeypatch.setattr(
+        builder,
+        "publish_bundle",
+        lambda source, destination: shutil.copytree(source, destination),
+    )
+
+    def rename(source: Path, target: Path) -> Path:
+        nonlocal rename_attempts
+        if source.name.startswith(f".{fingerprint}.partial-") and not rename_attempts:
+            rename_attempts += 1
+            raise PermissionError("Transient file scan lock")
+        return original_rename(source, target)
+
+    monkeypatch.setattr(Path, "rename", rename)
+
+    assert not builder.publish_component(
+        application, release_root, "BondsLiteModel", fingerprint
+    )
+    assert rename_attempts == 1
+    assert (
+        release_root
+        / "components"
+        / "BondsLiteModel"
+        / fingerprint
+        / "app"
+        / "BondsLiteModel.exe"
+    ).is_file()
 
 
 @pytest.mark.parametrize(
@@ -2130,6 +2639,145 @@ def test_excel_cache_falls_back_to_previous_bundle_when_new_release_incomplete(
 
     assert Path(actual).resolve() == cached.resolve()
     assert "cached release" in str(book.app.api.StatusBar).casefold()
+
+
+@pytest.mark.excel
+@pytest.mark.skipif(
+    os.environ.get("BONDS_LITE_RUN_STAGE_PANEL_EXCEL_TESTS") != "1",
+    reason="Set BONDS_LITE_RUN_STAGE_PANEL_EXCEL_TESTS=1",
+)
+def test_excel_shared_components_install_reuse_and_recover_from_copy_failure(
+    stage_panel_excel_book: Any, tmp_path: Path,
+) -> None:
+    import hashlib
+
+    import bonds_lite_input as workflow
+
+    book = stage_panel_excel_book
+    caller = tmp_path / "shared launcher.xlsm"
+    book.api.SaveAs(str(caller), FileFormat=52)
+    release_root = tmp_path / "central"
+    first_release = _create_shared_component_release(release_root, "shared-1")
+    licences = first_release / "Licences"
+    licences.mkdir()
+    (licences / "notice.txt").write_text("licence", encoding="ascii")
+    local_app_data = tmp_path / "local app data"
+    local_app_data.mkdir()
+    local_root = local_app_data / "BondsLite"
+    launcher = workflow.PACKAGED_VBA_LAUNCHER.replace(
+        r"\\server090\internal model$\29 Financial Resilience\Sandbox\SST spreadsheet executable file",
+        str(release_root),
+    ).replace(
+        'shell.ExpandEnvironmentStrings("%LOCALAPPDATA%")',
+        '"' + str(local_app_data).replace('"', '""') + '"',
+    )
+    test_entry = '''
+Public Function ResolveLocalBundleForTest() As String
+    On Error GoTo Failed
+    ResolveLocalBundleForTest = ResolveLocalBundle()
+    Exit Function
+Failed:
+    ResolveLocalBundleForTest = "TEST-ERROR:" & CStr(Err.Number) & ":" & Err.Description
+End Function
+'''
+    module = book.api.VBProject.VBComponents.Add(1)
+    module.Name = "modPackagedLauncher"
+    module.CodeModule.AddFromString(launcher + test_entry)
+
+    def resolve_bundle() -> Path:
+        result = book.app.api.Run(
+            "'" + book.name.replace("'", "''") + "'!ResolveLocalBundleForTest"
+        )
+        assert not result.startswith("TEST-ERROR:"), result
+        return Path(result).resolve()
+
+    first_cached = resolve_bundle()
+    assert first_cached == (
+        local_root / "releases" / "shared-1" / "Bonds Lite App"
+    ).resolve()
+    assert workflow._validate_packaged_bundle(first_cached, "shared-1")
+    assert not (first_cached / "Model").exists()
+    assert not (first_cached / "MACalc").exists()
+    model_component = local_root / "components" / "BondsLiteModel" / ("a" * 64)
+    reuse_sentinel = model_component / "app" / "reuse-sentinel.txt"
+    reuse_sentinel.write_text("kept", encoding="ascii")
+
+    second_release = release_root / "releases" / "shared-2" / "Bonds Lite App"
+    shutil.copytree(first_release, second_release)
+    second_controller = second_release / "Controller" / "BondsLiteController.exe"
+    second_controller.write_bytes(b"updated controller")
+    second_manifest = json.loads(
+        (second_release / "release.json").read_text(encoding="utf-8")
+    )
+    second_manifest["release_id"] = "shared-2"
+    second_manifest["controller_sha256"] = hashlib.sha256(
+        second_controller.read_bytes()
+    ).hexdigest()
+    (second_release / "release.json").write_text(
+        json.dumps(second_manifest), encoding="utf-8"
+    )
+    (release_root / "current.txt").write_text("shared-2", encoding="ascii")
+
+    second_cached = resolve_bundle()
+    assert second_cached == (
+        local_root / "releases" / "shared-2" / "Bonds Lite App"
+    ).resolve()
+    assert workflow._validate_packaged_bundle(second_cached, "shared-2")
+    assert reuse_sentinel.read_text(encoding="ascii") == "kept"
+    assert (local_root / "current.txt").read_text(encoding="ascii").strip() == "shared-2"
+
+    new_fingerprint = "c" * 64
+    central_model = release_root / "components" / "BondsLiteModel"
+    new_component = central_model / new_fingerprint
+    shutil.copytree(central_model / ("a" * 64), new_component)
+    (new_component / "component.id").write_text(
+        f"BondsLiteModel={new_fingerprint}", encoding="ascii"
+    )
+    component_record = json.loads(
+        (new_component / "component.json").read_text(encoding="utf-8")
+    )
+    component_record["fingerprint"] = new_fingerprint
+    (new_component / "component.json").write_text(
+        json.dumps(component_record), encoding="utf-8"
+    )
+    third_release = release_root / "releases" / "shared-3" / "Bonds Lite App"
+    shutil.copytree(second_release, third_release)
+    third_manifest = dict(second_manifest)
+    third_manifest["release_id"] = "shared-3"
+    third_manifest["component_fingerprints"] = {
+        **second_manifest["component_fingerprints"],
+        "BondsLiteModel": new_fingerprint,
+    }
+    (third_release / "release.json").write_text(
+        json.dumps(third_manifest), encoding="utf-8"
+    )
+    (third_release / "components.txt").write_text(
+        f"model={new_fingerprint}\nmacalc={'b' * 64}\n", encoding="ascii"
+    )
+    (release_root / "current.txt").write_text("shared-3", encoding="ascii")
+    copy_line = "filesystem.CopyFolder source, staging, False"
+    assert launcher.count(copy_line) == 1
+    interrupted_launcher = launcher.replace(
+        copy_line,
+        copy_line + '\n    Err.Raise vbObjectError + 499, , "Simulated copy failure"',
+    )
+    module.CodeModule.DeleteLines(1, module.CodeModule.CountOfLines)
+    module.CodeModule.AddFromString(interrupted_launcher + test_entry)
+
+    assert resolve_bundle() == second_cached
+    assert (local_root / "current.txt").read_text(encoding="ascii").strip() == "shared-2"
+    assert not (local_root / "components" / "BondsLiteModel" / new_fingerprint).exists()
+    assert not list((local_root / "components").rglob("*.partial-*"))
+
+    _create_packaged_release(release_root, "legacy")
+    module.CodeModule.DeleteLines(1, module.CodeModule.CountOfLines)
+    module.CodeModule.AddFromString(launcher + test_entry)
+    legacy_cached = resolve_bundle()
+    assert legacy_cached == (
+        local_root / "releases" / "legacy" / "Bonds Lite App"
+    ).resolve()
+    assert workflow._validate_packaged_bundle(legacy_cached, "legacy")
+    assert (legacy_cached / "Model" / "BondsLiteModel.exe").is_file()
 
 
 @pytest.mark.parametrize("packaged", [False, True])
