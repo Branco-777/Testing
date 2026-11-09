@@ -42,20 +42,24 @@ existing scenario inputs, templates and output paths as configured; those data
 paths are separate from the application cache. Do not copy application files
 between releases or delete LocalAppData cache folders while a run is active.
 
-**Deployment status:** release `20261109-cache-v24` is active in the central
-pointer since 9 November 2026, 15:20 UTC (built from `f1d486a`). It changes
-the generic Property Stage 2 waiting message from every five seconds to
-every minute. Other stages and the five-minute LTM updates are unchanged.
-The controller, model and MACalc packaged self-tests passed, and the
-published executable hashes match `release.json`. The packaged controller's
-main routine matches the tested source; the Bonds and MACalc executables,
-model sources and dependency versions are unchanged from v23.
+**Deployment status:** release `20261109-cache-v25` is active in the central
+pointer since 9 November 2026 (built from `f9071b9`). Property Stage 2 now
+loads the JRC add-in in its own Excel, stops before the macro if `P. Curves`
+is not numeric, and rejects a run whose `O. PVOutput` has no non-zero PVs for
+any scenario. Other stages are unchanged. The controller, model and MACalc
+packaged self-tests passed, and the published executable hashes match
+`release.json`.
 
 Live LTM acceptance remains outstanding; scenario-progress reads and abort
 behaviour have not yet been verified in a live Excel run. Once any active
 run has finished, fully close and reopen Excel so the next button click
-checks the promoted release. To roll back, write `20261109-cache-v23` to the
+checks the promoted release. To roll back, write `20261109-cache-v24` to the
 central `current.txt` as plain ASCII without a trailing line break.
+
+Release `20261109-cache-v24` was active earlier on 9 November 2026 (built
+from `f1d486a`). It changed the generic Property Stage 2 waiting message from
+every five seconds to every minute. Its previous rollback target was
+`20261109-cache-v23`.
 
 Release `20261109-cache-v23` was active earlier on 9 November 2026. It added
 Property Stage 2 heartbeats, scenario progress when readable, activity
@@ -599,17 +603,22 @@ rejects partial named installations or occupied cells/shapes. Excel must allow
 programmatic access to the VBA project.
 
 The Stage 2 button opens the handed-off LTM workbook in a second, visible Excel
-instance. It does not update external links. After a full recalculation, it
-calls the existing `CallRunFrozenPython("flipper")` macro directly, without
+instance. It does not update external links. Excel does not load start-up
+add-ins in an instance started this way, so Stage 2 first loads the XLL
+add-ins that your normal Excel opens at start-up (the `OPEN` entries under
+Excel's options in the registry). This includes the JUST DataMart add-in that
+provides `JRC_SpotAnnual`. After a full recalculation, Stage 2 checks that
+every `P. Curves` value is numeric and stops before the macro if any is not.
+It then calls the existing `CallRunFrozenPython("flipper")` macro directly, without
 opening the macro button's option prompt. The model updates the same workbook;
 Stage 2 creates no additional output workbook or folder. Keep the second Excel
-instance visible and attend to any Excel or VBA error dialog. There is no
-automated timeout or process termination.
+instance visible and attend to any Excel or VBA error dialog.
 
 Stage 2 saves in place only after confirming fresh `RunStartTime` and
 `RunEndTime` values, completion markers for every scenario, the final
 `End of multirun!` progress message, and non-blank output on `O. CFOutput`,
-`O. PVOutput`. The unused `O. ConcRisk` tab is not validated and may be empty
+`O. PVOutput`. Every scenario must also appear in `O. PVOutput` with at least
+one non-zero PV. The unused `O. ConcRisk` tab is not validated and may be empty
 or absent. It then confirms Excel reports the workbook saved and its
 modification time advanced. If a run or check fails before that commit, the
 Stage 1 workbook is closed without saving. If post-save verification fails,
@@ -631,6 +640,17 @@ From release `20261109-cache-v24`, the controller prints generic
 `Waiting: Processing` messages every minute for Property Stage 2 only,
 leaving the five-minute LTM updates unchanged. Other stages retain their
 five-second generic waiting interval.
+
+From release `20261109-cache-v25`, Stage 2 loads the JRC add-in and adds the
+curve and PV checks above. Earlier releases could save an `O. PVOutput` of
+all zeros (with blank ERC columns in `O. CFOutput`), because `P. Curves`
+recalculated to `#NAME?`; re-run Stage 2 for any workbook produced that way.
+The checks report these errors:
+
+| Error | Cause | Action |
+|---|---|---|
+| `LTM P. Curves contains errors or blanks after recalculation; the JRC add-in (JRC_SpotAnnual) did not load in the Stage 2 Excel` | The DataMart/JRC add-in is not registered for your normal Excel, or failed to load | Confirm `JRC_SpotAnnual` calculates in normal Excel, then re-run. Nothing was run or saved. |
+| `LTM O. PVOutput has no non-zero PVs for scenario(s) ...` | The run completed but those scenarios produced no PVs | The workbook was not saved. Check `P. Curves` and the LTM progress log, then re-run. |
 
 The time limit is 10 minutes per scenario, with a 30-minute minimum (160
 minutes for 16 scenarios). At the limit, the console asks whether to wait 30
