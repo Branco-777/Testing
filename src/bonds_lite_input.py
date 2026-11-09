@@ -2998,7 +2998,8 @@ def main() -> int:
         parser.error("Specify --caller and --excel-hwnd, or --install-button")
     result = 0
     caller_path_token = None
-    with run_progress() as progress:
+    heartbeat_interval = 60.0 if arguments.stage == "P2" else 5.0
+    with run_progress(heartbeat_interval=heartbeat_interval) as progress:
         stage_name = (
             "Property Stage 1"
             if arguments.stage == "P1"

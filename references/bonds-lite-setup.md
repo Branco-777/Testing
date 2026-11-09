@@ -622,6 +622,12 @@ no CPU activity for 10 minutes.
 If the runner exits but the macro is still waiting after two minutes, check the
 LTM Excel window for an error dialog. These warnings do not stop the run.
 
+The source controller now prints generic `Waiting: Processing` messages
+every minute for Property Stage 2 only, leaving the five-minute LTM updates
+unchanged. Other stages retain their five-second generic waiting interval.
+This console-frequency change is not yet packaged; v23 still uses five
+seconds.
+
 The time limit is 10 minutes per scenario, with a 30-minute minimum (160
 minutes for 16 scenarios). At the limit, the console asks whether to wait 30
 more minutes or abort. A blank response or no response keeps the run going.

@@ -1362,7 +1362,7 @@ def test_timed_stage_logs_failure_and_rethrows_original(
             assert not state.stages
 
 
-@pytest.mark.parametrize("interval", [5.0, 1.25])
+@pytest.mark.parametrize("interval", [5.0, 1.25, 60.0])
 @pytest.mark.parametrize("error_type", [None, RuntimeError, KeyboardInterrupt])
 def test_run_progress_stops_and_joins_one_reporter_on_every_exit(
     error_type: type[BaseException] | None, interval: float,
@@ -7420,7 +7420,7 @@ def test_main_installs_property_stage_two_controls_from_cli(
     assert any(str(backup) in message for message in messages)
 
 
-@pytest.mark.parametrize("stage", [None, "1", "2", "3", "4"])
+@pytest.mark.parametrize("stage", [None, "1", "2", "3", "4", "P1", "P2"])
 @pytest.mark.parametrize("outcome", ["success", "failure", "interrupted"])
 def test_main_console_messages_identify_the_selected_stage(
     monkeypatch: pytest.MonkeyPatch,
@@ -7456,20 +7456,36 @@ def test_main_console_messages_identify_the_selected_stage(
     monkeypatch.setitem(
         sys.modules, "sst_stage_four", SimpleNamespace(run_stage_four=run)
     )
+    monkeypatch.setitem(
+        sys.modules,
+        "sst_property_stage_one",
+        SimpleNamespace(run_property_stage_one=run),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "sst_property_stage_two",
+        SimpleNamespace(run_property_stage_two=run),
+    )
 
     assert workflow.main() == (0 if outcome == "success" else 1)
 
     console = capsys.readouterr().out
-    selected = stage or "1"
+    selected = (
+        f"Property Stage {stage[1:]}"
+        if stage is not None and stage.startswith("P")
+        else f"Stage {stage or '1'}"
+    )
     assert console.startswith(
-        f"Stage {selected} started | timings exclude Python startup"
+        f"{selected} started | timings exclude Python startup"
     )
     if outcome == "failure":
-        assert f"Stage {selected} failed: stage failure sentinel" in console
+        assert f"{selected} failed: stage failure sentinel" in console
     elif outcome == "interrupted":
-        assert f"Stage {selected} interrupted by the user" in console
+        assert f"{selected} interrupted by the user" in console
     assert "Bonds Lite input started" not in console
     assert "Bonds Lite input failed" not in console
+    expected_interval = 60.0 if stage == "P2" else 5.0
+    assert [reporter.args[2] for reporter in reporting_threads] == [expected_interval]
     assert all(reporter.joined for reporter in reporting_threads)
 
 
