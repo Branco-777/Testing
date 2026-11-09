@@ -1,12 +1,12 @@
 # Bonds Lite Input Setup And Use
 
-Version 1.1 | 2 November 2026 | Local-cache v4 active; named path controls installed
+Version 1.2 | 9 November 2026 | Local-cache v23 active; Property Stage 2 safeguards
 
 ## Overview
 
 Generate Bonds Lite Input on the Draft workbook's I. Control sheet starts the workflow through a small VBA launcher. Stage 1 prepares two validated inputs, Bonds and MAP, using one template and one captured set of date/entity/stresses. Both must succeed before the run folder becomes eligible for Stage 2. Stage 2 runs the unchanged folder-based Bonds Lite batch against that exact pair.
 
-The colleague deployment uses frozen controller/model executables cached under the current Windows user's LocalAppData. Draft stays in the user's locally synced SharePoint/OneDrive folder; the launcher resolves that user's local Draft path and attaches to the exact open Excel instance. The central release share is checked once at the first button click in each Excel session. Later clicks use the local cache without network access. Release v4 is active and Stage 1 reads its three path controls through workbook names.
+The colleague deployment uses frozen controller/model executables cached under the current Windows user's LocalAppData. Draft stays in the user's locally synced SharePoint/OneDrive folder; the launcher resolves that user's local Draft path and attaches to the exact open Excel instance. The central release share is checked once at the first button click in each Excel session. Later clicks use the local cache without network access. Release v23 is active and Stage 1 reads its three path controls through workbook names.
 
 ## Prerequisites
 
@@ -42,11 +42,25 @@ existing scenario inputs, templates and output paths as configured; those data
 paths are separate from the application cache. Do not copy application files
 between releases or delete LocalAppData cache folders while a run is active.
 
-**Deployment status:** release `20261109-cache-v22` is active in the central
-pointer since 9 November 2026. It no longer requires the unused `O. ConcRisk`
-sheet to exist or contain data after a Property Stage 2 run. The controller,
-model and MACalc packaged self-tests passed. To roll back, write
-`20261107-cache-v20` to the central `current.txt`.
+**Deployment status:** release `20261109-cache-v23` is active in the central
+pointer since 9 November 2026, 11:53 UTC (built from `e571716`). It adds
+Property Stage 2 heartbeats, scenario progress when readable, activity
+warnings and the user-controlled time-limit prompt. The controller, model
+and MACalc packaged self-tests passed, and the published executable hashes
+match `release.json`. The controller archive includes the watchdog and its
+Windows runtime dependencies. The Bonds and MACalc executables, model
+sources and dependency versions are unchanged from v22.
+
+Live LTM acceptance remains outstanding; scenario-progress reads and abort
+behaviour have not yet been verified in a live Excel run. Once any active
+run has finished, fully close and reopen Excel so the next button click
+checks the promoted release. To roll back, write `20261109-cache-v22` to the
+central `current.txt` as plain ASCII without a trailing line break.
+
+Release `20261109-cache-v22` was active earlier on 9 November 2026. It removed
+the requirement for the unused `O. ConcRisk` sheet to exist or contain data
+after a Property Stage 2 run. Its controller, model and MACalc packaged
+self-tests passed. The previous rollback target was `20261107-cache-v20`.
 
 Release `20261107-cache-v19` (built from `02c2fa0`) was active earlier on
 7 November 2026. It fixes Property Stage 2
@@ -599,11 +613,12 @@ successfully verified LTM workbook is retained if only the final Draft audit
 save fails; the audit reports the distinct workbook and Draft states and
 retains the previous `Last Successful Run`.
 
-While the LTM macro runs, Stage 2 reports elapsed time and, when Excel allows a
-read-only progress query, the number of completed scenarios every five
-minutes. The query has a five-second limit; if Excel does not respond, scenario
-updates are disabled for the rest of that run while the other safeguards
-continue. Stage 2 warns if the runner has had no CPU activity for 10 minutes.
+From release `20261109-cache-v23`, while the LTM macro runs, Stage 2 reports
+elapsed time and, when Excel allows a read-only progress query, the number of
+completed scenarios every five minutes. The query has a five-second limit;
+if Excel does not respond, scenario updates are disabled for the rest of that
+run while the other safeguards continue. Stage 2 warns if the runner has had
+no CPU activity for 10 minutes.
 If the runner exits but the macro is still waiting after two minutes, check the
 LTM Excel window for an error dialog. These warnings do not stop the run.
 

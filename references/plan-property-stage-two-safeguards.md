@@ -1,6 +1,6 @@
 # Plan: Property Stage 2 Long-Run Safeguards
 
-Status: Implementation, Decision 102 and release approved; build and promotion in progress; live acceptance outstanding | 9 November 2026 | Decisions 99-103
+Status: Implemented and promoted in 20261109-cache-v23; live acceptance outstanding | 9 November 2026 | Decisions 99-103
 
 ## Overview
 
@@ -97,6 +97,7 @@ an abort at a per-scenario time limit. The LTM macro and model are unchanged.
    commit, build a new release ID without `--promote`, check the self-tests
    and hashes, then promote. Decision 103 authorises release before step 6;
    live acceptance remains outstanding.
+   [✓ Implemented — see addendum]
 
 ## Test Strategy
 
@@ -193,6 +194,13 @@ format. The live check uses a disposable copy of a real Stage 1 workbook.
 - Step 6 (live acceptance) remains pending separate user approval. The user
   approved step 7 (build and promotion) on 9 November 2026 before live
   acceptance; this authorised sequence change is recorded in Decision 103.
+- Step 7 completed: `20261109-cache-v23` was built from `e571716` and promoted
+  on 9 November 2026 at 11:53 UTC. All three packaged self-tests passed, and
+  the published executable hashes match `release.json`. The controller
+  archive and runtime files contain the watchdog and its Windows
+  dependencies. Bonds and MACalc executables, model sources and dependency
+  versions match v22. The central pointer was verified as plain ASCII with
+  no line break. Rollback target: `20261109-cache-v22`.
 - Key decisions: 99 (user-approved run limits and prompts), 100 (watcher
   technical approach), 101 (approval to implement; live acceptance and release
   remain separate gates), 102 (bounded progress query, approved), and 103
