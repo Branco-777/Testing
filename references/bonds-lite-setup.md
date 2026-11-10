@@ -533,17 +533,23 @@ when it reuses a component. `release.json` lists the fingerprints under
 `reused_components`. All three self-tests and the source checks still run on
 every build. Pass `--rebuild-all` (or `--clean`) to force a full rebuild.
 
-The shared-component release layout has passed local validation but is **not
-published to the central share or promoted**. A local candidate,
-`20261109-shared-validation`, passed all three frozen self-tests and component
-and executable hash checks. The disposable Excel install, reuse and
-copy-failure recovery test passed, and the Draft launcher was updated after a
-backup. The Model application was reused from its verified fingerprint cache.
-The MACalc application retains Numba and the 64-bit Windows CBC solver; it
-omits CBC binaries for other platforms. The central `current.txt` remains
-`20261109-cache-v25`. No financial batch or packaged button acceptance run has
-been performed. Obtain separate approval before publishing or promoting this
-layout.
+Release `20261110-shared-v26` is the first shared-component release. It was
+published and promoted on 10 November 2026 after all three frozen self-tests
+passed. Its Model and MACalc applications are stored once under
+`components\BondsLiteModel\<fingerprint>` and
+`components\MACalcModel\<fingerprint>` on the central share. The release
+folder contains only the controller, licences, `components.txt` and
+`release.json`. The MACalc application retains Numba and the 64-bit Windows
+CBC solver; it omits CBC binaries for other platforms. The user confirmed the
+release appears to work from the updated Draft. Drafts with the older launcher
+reject this layout and keep using their last cached whole-bundle release, so
+users need the updated Draft VBA. The first run on each machine downloads both
+components (about 600 MB); later controller-only releases download about
+33 MB. To roll back, write `20261109-cache-v25` to the central `current.txt`.
+
+If a component copy to the share is interrupted, the build stops before
+`current.txt` changes, but a hidden `.<fingerprint>.partial-*` folder can be
+left under `components\<name>`. Delete it before retrying the build.
 
 The builder publishes with `robocopy /MT:16` and then checks that every staged
 file exists in the release with the same size. If the copy fails or is
