@@ -1500,6 +1500,7 @@ def _create_packaged_release(
 
 def _create_shared_component_release(
     release_root: Path, release_id: str = "20261109-shared-components-v1",
+    component_folder_length: int = 12,
 ) -> Path:
     """Create a release with components in the shared content-addressed store."""
     import hashlib
@@ -1515,7 +1516,12 @@ def _create_shared_component_release(
     executable_hashes: dict[str, str] = {}
     for name, fingerprint in fingerprints.items():
         executable_name = f"{name}.exe"
-        component = release_root / "components" / name / fingerprint
+        component = (
+            release_root
+            / "components"
+            / name
+            / fingerprint[:component_folder_length]
+        )
         application = component / "app"
         application.mkdir(parents=True)
         executable = application / executable_name
@@ -1542,7 +1548,7 @@ def _create_shared_component_release(
     manifest = {
         "release_id": release_id,
         "built_utc": "2026-11-09T00:00:00+00:00",
-        "layout_version": 2,
+        "layout_version": 3 if component_folder_length == 12 else 2,
         "controller_sha256": hashlib.sha256(controller.read_bytes()).hexdigest(),
         "model_executable_sha256": executable_hashes["BondsLiteModel"],
         "macalc_executable_sha256": executable_hashes["MACalcModel"],
@@ -1675,14 +1681,14 @@ def test_validate_packaged_bundle_checks_shared_component_manifest_and_hashes(
         bundle.parents[2]
         / "components"
         / "BondsLiteModel"
-        / ("a" * 64)
+        / ("a" * 12)
         / "app"
     )
     assert macalc == (
         bundle.parents[2]
         / "components"
         / "MACalcModel"
-        / ("b" * 64)
+        / ("b" * 12)
         / "app"
     )
 
@@ -1701,6 +1707,27 @@ def test_validate_shared_bundle_rejects_a_missing_component_map(
 
     with pytest.raises(BondsLiteError, match=r"(?i)component map.*missing"):
         workflow._validate_packaged_bundle(bundle)
+
+
+def test_resolve_packaged_component_supports_legacy_full_fingerprint_folder(
+    tmp_path: Path,
+) -> None:
+    import bonds_lite_input as workflow
+
+    bundle = _create_shared_component_release(
+        tmp_path / "release source",
+        "shared-full-fingerprint",
+        component_folder_length=64,
+    )
+
+    assert workflow._validate_packaged_bundle(bundle)
+    assert workflow.resolve_packaged_component(bundle, "BondsLiteModel") == (
+        bundle.parents[2]
+        / "components"
+        / "BondsLiteModel"
+        / ("a" * 64)
+        / "app"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1745,7 +1772,7 @@ def test_load_model_config_resolves_shared_component_without_user_python(
         bundle.parents[2]
         / "components"
         / "BondsLiteModel"
-        / ("a" * 64)
+        / ("a" * 12)
         / "app"
         / "BondsLiteModel.exe"
     )
@@ -1766,6 +1793,8 @@ def test_packaged_launcher_uses_release_only_as_copy_source_and_launches_cache()
     assert re.search(r'(?i)BuildPath\(localRoot, "components"\)', launcher)
     assert "EnsureLocalComponent" in launcher
     assert "component.id" in launcher
+    assert "Left$(fingerprint, 12)" in launcher
+    assert "filesystem.BuildPath(componentParent, fingerprint)" in compact
     assert "MoveFileExW" in launcher
     assert (
         'Else\n            operation = "copy the legacy full release"\n'
@@ -1876,6 +1905,47 @@ def test_packaged_launcher_routes_local_install_errors_to_cache_recovery() -> No
     )[1].split("\nEnd Sub", 1)[0]
     assert 'operation = "copy the component to " & staging' in component_copy
     assert "errorMessage = operation & \": \" & Err.Description" in component_copy
+
+
+def test_packaged_launcher_reports_component_copy_progress_and_fallback_cause() -> None:
+    import bonds_lite_input as workflow
+
+    launcher = workflow.PACKAGED_VBA_LAUNCHER
+    component_copy = launcher.split(
+        "Private Sub EnsureLocalComponent(", 1
+    )[1].split("\nEnd Sub", 1)[0]
+    component_copy = re.sub(r"\s*_\s*\r?\n\s*", " ", component_copy)
+    copy_status = (
+        'Application.StatusBar = "Copying Bonds Lite model components to local '
+        'runtime. This may take several minutes..."'
+    )
+    assert component_copy.index(copy_status) < component_copy.index(
+        "filesystem.CopyFolder source, staging, False"
+    )
+    assert component_copy.index("DoEvents") > component_copy.index(copy_status)
+
+    compact_launcher = re.sub(r"\s*_\s*\r?\n\s*", " ", launcher)
+    assert compact_launcher.count(
+        "ShowCachedReleaseWarning localReleaseId, errorMessage"
+    ) == 3
+    warning = compact_launcher.split(
+        "Private Sub ShowCachedReleaseWarning(", 1
+    )[1].split("\nEnd Sub", 1)[0]
+    status_prefix = "Bonds Lite update unavailable; using cached release "
+    assert (
+        f'Application.StatusBar = "{status_prefix}" & localReleaseId'
+        in warning
+    )
+    assert len(status_prefix) + 80 <= 255
+    assert '"Reason: " & errorMessage' in warning
+    assert 'MsgBox warningMessage, vbExclamation, "Bonds Lite"' in warning
+    incomplete_release = launcher.split(
+        "If Not CompleteBundle(sourceBundle", 1
+    )[1].split("On Error GoTo CopyFailed", 1)[0]
+    assert (
+        'errorMessage = "The selected central Bonds Lite release is incomplete"'
+        in incomplete_release
+    )
 
 
 @pytest.mark.parametrize(
@@ -2007,13 +2077,13 @@ def test_packaged_builder_publishes_versioned_central_copy_source(
     assert not (release / "Model").exists()
     assert not (release / "MACalc").exists()
     manifest = json.loads((release / "release.json").read_text(encoding="utf-8"))
-    assert manifest["layout_version"] == 2
+    assert manifest["layout_version"] == 3
     assert (release / "components.txt").is_file()
     model_exe = (
         release_root
         / "components"
         / "BondsLiteModel"
-        / manifest["component_fingerprints"]["BondsLiteModel"]
+        / manifest["component_fingerprints"]["BondsLiteModel"][:12]
         / "app"
         / "BondsLiteModel.exe"
     )
@@ -2021,7 +2091,7 @@ def test_packaged_builder_publishes_versioned_central_copy_source(
         release_root
         / "components"
         / "MACalcModel"
-        / manifest["component_fingerprints"]["MACalcModel"]
+        / manifest["component_fingerprints"]["MACalcModel"][:12]
         / "app"
         / "MACalcModel.exe"
     )
@@ -2318,7 +2388,7 @@ def test_publish_component_reuses_only_a_matching_verified_component(
         application, release_root, "BondsLiteModel", fingerprint
     )
     component = (
-        release_root / "components" / "BondsLiteModel" / fingerprint
+        release_root / "components" / "BondsLiteModel" / fingerprint[:12]
     )
     record = json.loads((component / "component.json").read_text(encoding="utf-8"))
     assert (component / "component.id").read_text(encoding="ascii") == (
@@ -2376,8 +2446,51 @@ def test_publish_component_rejects_corrupted_executable_copy(
             application, release_root, "BondsLiteModel", fingerprint
         )
     component_parent = release_root / "components" / "BondsLiteModel"
-    assert not (component_parent / fingerprint).exists()
+    assert not (component_parent / fingerprint[:12]).exists()
     assert not list(component_parent.iterdir())
+
+
+def test_publish_component_rejects_paths_excel_cannot_copy(
+    tmp_path: Path,
+) -> None:
+    """Regression: 64-character component folders pushed DLL paths past MAX_PATH."""
+    from tools import build_packaged_stages as builder
+
+    application = tmp_path / "built" / "BondsLiteModel"
+    library = application / "_internal" / "numpy.libs" / ("l" * 80 + ".dll")
+    library.parent.mkdir(parents=True)
+    library.write_bytes(b"library")
+    (application / "BondsLiteModel.exe").write_bytes(b"model executable")
+    release_root = Path("C:\\" + "r" * 150)
+
+    with pytest.raises(RuntimeError, match=r"(?i)Excel cannot copy.*260"):
+        builder.publish_component(
+            application, release_root, "BondsLiteModel", "a" * 64
+        )
+    assert not release_root.exists()
+
+
+def test_shared_component_folder_name_fits_live_share_path_budget() -> None:
+    """Regression: the longest live DLL path must stay below MAX_PATH."""
+    import bonds_lite_input as workflow
+    from tools import build_packaged_stages as builder
+
+    assert workflow.COMPONENT_FOLDER_LENGTH == builder.COMPONENT_FOLDER_LENGTH
+    assert f"Left$(fingerprint, {builder.COMPONENT_FOLDER_LENGTH})" in (
+        workflow.PACKAGED_VBA_LAUNCHER
+    )
+    library = (
+        "app\\_internal\\numpy.libs\\libopenblas64__v0.3.23-293-gc2f4bdbb-"
+        "gcc_10_3_0-2bde3a66a51006b2b53eb373ff767a3f.dll"
+    )
+    component = builder.CENTRAL_RELEASE_ROOT / "components" / "BondsLiteModel"
+    long_path = str(component / ("f" * 64) / library)
+    short_path = str(
+        component / ("f" * builder.COMPONENT_FOLDER_LENGTH) / library
+    )
+
+    assert len(long_path) >= builder.WINDOWS_MAX_PATH
+    assert len(short_path) < builder.WINDOWS_MAX_PATH
 
 
 def test_publish_component_retries_transient_windows_rename_error(
@@ -2417,7 +2530,7 @@ def test_publish_component_retries_transient_windows_rename_error(
         release_root
         / "components"
         / "BondsLiteModel"
-        / fingerprint
+        / fingerprint[:12]
         / "app"
         / "BondsLiteModel.exe"
     ).is_file()
@@ -2468,11 +2581,15 @@ def test_pyinstaller_command_hidden_imports_controller_stages_only(
     assert "sst_stage_four" in hidden_imports(None)
     assert "sst_property_stage_one" in hidden_imports(None)
     assert "sst_property_stage_two" in hidden_imports(None)
+    assert "sst_property_stage_three" in hidden_imports(None)
+    assert "sst_property_stage_four" in hidden_imports(None)
     assert "sst_property_stage_two_watchdog" in hidden_imports(None)
     assert "sst_stage_three" not in hidden_imports(tmp_path / "model")
     assert "sst_stage_four" not in hidden_imports(tmp_path / "model")
     assert "sst_property_stage_one" not in hidden_imports(tmp_path / "model")
     assert "sst_property_stage_two" not in hidden_imports(tmp_path / "model")
+    assert "sst_property_stage_three" not in hidden_imports(tmp_path / "model")
+    assert "sst_property_stage_four" not in hidden_imports(tmp_path / "model")
     assert "sst_property_stage_two_watchdog" not in hidden_imports(tmp_path / "model")
 
 
@@ -2525,6 +2642,18 @@ def test_packaged_builder_adds_macalc_model_application_and_pulp_runtime(
     for index, option in enumerate(command[:-1]):
         if option == "--add-data":
             assert not any(name in command[index + 1] for name in PROVENANCE_FILES)
+
+
+def _capture_launcher_fallback_warning(launcher: str) -> str:
+    """Capture the warning without displaying a modal dialog in Excel tests."""
+    return launcher.replace(
+        "Option Explicit\n",
+        "Option Explicit\nPublic CapturedFallbackWarning As String\n",
+        1,
+    ).replace(
+        'MsgBox warningMessage, vbExclamation, "Bonds Lite"',
+        "CapturedFallbackWarning = warningMessage",
+    )
 
 
 @pytest.mark.excel
@@ -2629,16 +2758,84 @@ def test_excel_cache_falls_back_to_previous_bundle_when_new_release_incomplete(
         "Private Function CurrentLocalBundle()",
         "Public Function CurrentLocalBundle()",
     )
+    launcher = _capture_launcher_fallback_warning(launcher)
+    test_entry = '''
+Public Function CapturedFallbackWarningForTest() As String
+    CapturedFallbackWarningForTest = CapturedFallbackWarning
+End Function
+'''
     module = book.api.VBProject.VBComponents.Add(1)
     module.Name = "modPackagedLauncher"
-    module.CodeModule.AddFromString(launcher)
+    module.CodeModule.AddFromString(launcher + test_entry)
 
     actual = book.app.api.Run(
         "'" + book.name.replace("'", "''") + "'!CurrentLocalBundle"
     )
+    warning = book.app.api.Run(
+        "'" + book.name.replace("'", "''") + "'!CapturedFallbackWarningForTest"
+    )
 
     assert Path(actual).resolve() == cached.resolve()
     assert "cached release" in str(book.app.api.StatusBar).casefold()
+    assert "The selected central Bonds Lite release is incomplete" in warning
+
+
+@pytest.mark.excel
+@pytest.mark.skipif(
+    os.environ.get("BONDS_LITE_RUN_STAGE_PANEL_EXCEL_TESTS") != "1",
+    reason="Set BONDS_LITE_RUN_STAGE_PANEL_EXCEL_TESTS=1",
+)
+def test_excel_launcher_downloads_legacy_full_fingerprint_components(
+    stage_panel_excel_book: Any, tmp_path: Path,
+) -> None:
+    import bonds_lite_input as workflow
+
+    book = stage_panel_excel_book
+    caller = tmp_path / "legacy shared launcher.xlsm"
+    book.api.SaveAs(str(caller), FileFormat=52)
+    release_root = tmp_path / "central"
+    bundle = _create_shared_component_release(
+        release_root, "legacy-shared-release", component_folder_length=64
+    )
+    local_app_data = tmp_path / "local app data"
+    local_app_data.mkdir()
+    launcher = workflow.PACKAGED_VBA_LAUNCHER.replace(
+        r"\\server090\internal model$\29 Financial Resilience\Sandbox\SST spreadsheet executable file",
+        str(release_root),
+    ).replace(
+        'shell.ExpandEnvironmentStrings("%LOCALAPPDATA%")',
+        '"' + str(local_app_data).replace('"', '""') + '"',
+    ).replace(
+        "Private Function CurrentLocalBundle()",
+        "Public Function CurrentLocalBundle()",
+    )
+    module = book.api.VBProject.VBComponents.Add(1)
+    module.Name = "modPackagedLauncher"
+    module.CodeModule.AddFromString(launcher)
+
+    result = book.app.api.Run(
+        "'" + book.name.replace("'", "''") + "'!CurrentLocalBundle"
+    )
+    cached = Path(result)
+
+    assert cached == (
+        local_app_data
+        / "BondsLite"
+        / "releases"
+        / "legacy-shared-release"
+        / "Bonds Lite App"
+    )
+    assert workflow._validate_packaged_bundle(cached, "legacy-shared-release")
+    for name, fingerprint in (("BondsLiteModel", "a" * 64), ("MACalcModel", "b" * 64)):
+        assert (
+            local_app_data
+            / "BondsLite"
+            / "components"
+            / name
+            / fingerprint
+            / "app"
+            / f"{name}.exe"
+        ).is_file()
 
 
 @pytest.mark.excel
@@ -2671,6 +2868,7 @@ def test_excel_shared_components_install_reuse_and_recover_from_copy_failure(
         'shell.ExpandEnvironmentStrings("%LOCALAPPDATA%")',
         '"' + str(local_app_data).replace('"', '""') + '"',
     )
+    launcher = _capture_launcher_fallback_warning(launcher)
     test_entry = '''
 Public Function ResolveLocalBundleForTest() As String
     On Error GoTo Failed
@@ -2678,6 +2876,9 @@ Public Function ResolveLocalBundleForTest() As String
     Exit Function
 Failed:
     ResolveLocalBundleForTest = "TEST-ERROR:" & CStr(Err.Number) & ":" & Err.Description
+End Function
+Public Function CapturedFallbackWarningForTest() As String
+    CapturedFallbackWarningForTest = CapturedFallbackWarning
 End Function
 '''
     module = book.api.VBProject.VBComponents.Add(1)
@@ -2698,7 +2899,7 @@ End Function
     assert workflow._validate_packaged_bundle(first_cached, "shared-1")
     assert not (first_cached / "Model").exists()
     assert not (first_cached / "MACalc").exists()
-    model_component = local_root / "components" / "BondsLiteModel" / ("a" * 64)
+    model_component = local_root / "components" / "BondsLiteModel" / ("a" * 12)
     reuse_sentinel = model_component / "app" / "reuse-sentinel.txt"
     reuse_sentinel.write_text("kept", encoding="ascii")
 
@@ -2728,8 +2929,8 @@ End Function
 
     new_fingerprint = "c" * 64
     central_model = release_root / "components" / "BondsLiteModel"
-    new_component = central_model / new_fingerprint
-    shutil.copytree(central_model / ("a" * 64), new_component)
+    new_component = central_model / new_fingerprint[:12]
+    shutil.copytree(central_model / ("a" * 12), new_component)
     (new_component / "component.id").write_text(
         f"BondsLiteModel={new_fingerprint}", encoding="ascii"
     )
@@ -2757,16 +2958,22 @@ End Function
     (release_root / "current.txt").write_text("shared-3", encoding="ascii")
     copy_line = "filesystem.CopyFolder source, staging, False"
     assert launcher.count(copy_line) == 1
+    long_reason = "Simulated copy failure " + "x" * 300 + " END"
     interrupted_launcher = launcher.replace(
         copy_line,
-        copy_line + '\n    Err.Raise vbObjectError + 499, , "Simulated copy failure"',
+        copy_line + f'\n    Err.Raise vbObjectError + 499, , "{long_reason}"',
     )
     module.CodeModule.DeleteLines(1, module.CodeModule.CountOfLines)
     module.CodeModule.AddFromString(interrupted_launcher + test_entry)
 
     assert resolve_bundle() == second_cached
+    warning = book.app.api.Run(
+        "'" + book.name.replace("'", "''") + "'!CapturedFallbackWarningForTest"
+    )
+    assert long_reason in warning
+    assert len(str(book.app.api.StatusBar)) <= 255
     assert (local_root / "current.txt").read_text(encoding="ascii").strip() == "shared-2"
-    assert not (local_root / "components" / "BondsLiteModel" / new_fingerprint).exists()
+    assert not (local_root / "components" / "BondsLiteModel" / new_fingerprint[:12]).exists()
     assert not list((local_root / "components").rglob("*.partial-*"))
 
     _create_packaged_release(release_root, "legacy")
@@ -2789,13 +2996,18 @@ def test_install_button_selects_packaged_launcher_or_source_fallback(
     caller = tmp_path / "Draft.xlsm"
     caller.write_bytes(b"disposable caller")
     installed: list[str] = []
+    existing_stage_macros = (
+        'Public Sub PrepareNoteVal()\n    LaunchBondsLite "P3"\nEnd Sub\n'
+        'Public Sub RunNoteVal()\n    LaunchBondsLite "P4"\nEnd Sub\n'
+    )
     code_module = SimpleNamespace(
-        CountOfLines=0, AddFromString=installed.append,
+        CountOfLines=6, Lines=lambda *args: existing_stage_macros,
+        AddFromString=installed.append,
         DeleteLines=lambda *args: None,
     )
     component = SimpleNamespace(Name="modBondsLiteLauncher", CodeModule=code_module)
     components = SimpleNamespace(
-        Count=0, Add=lambda kind: component,
+        Count=1, Add=lambda kind: component,
         Item=lambda *args: component,
     )
     panel = SimpleNamespace(row=100, left=500, rows=SimpleNamespace(count=10))
@@ -2832,7 +3044,7 @@ def test_install_button_selects_packaged_launcher_or_source_fallback(
     workflow.install_button(caller, **options)
 
     expected = workflow.PACKAGED_VBA_LAUNCHER if packaged else workflow.VBA_LAUNCHER
-    assert installed == [expected]
+    assert installed == [expected + "\n" + existing_stage_macros]
 
 
 def test_load_model_config_uses_sibling_executable_without_user_python(
@@ -8174,6 +8386,118 @@ def test_main_stage_p2_dispatches_only_to_property_stage_two(
     assert all(reporter.joined for reporter in reporting_threads)
 
 
+def test_main_stage_p3_dispatches_only_to_property_stage_three(
+    monkeypatch: pytest.MonkeyPatch,
+    console_logger: logging.Logger,
+    reporting_threads: list[Any],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import bonds_lite_input as workflow
+
+    caller = SimpleNamespace(
+        fullname="Draft.xlsm", api=SimpleNamespace(FullName="Draft.xlsm")
+    )
+    app = SimpleNamespace(api=SimpleNamespace(Hwnd=1234), books=[caller])
+    output = Path("SST Output_Test/Property/JRL_NoteVal_Test.xlsb")
+    received: list[Any] = []
+
+    def run_property_stage_three(book: Any) -> Path:
+        received.append(book)
+        return output
+
+    monkeypatch.setitem(sys.modules, "xlwings", SimpleNamespace(apps=[app]))
+    monkeypatch.setitem(
+        sys.modules,
+        "sst_property_stage_three",
+        SimpleNamespace(run_property_stage_three=run_property_stage_three),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "bonds_lite_input",
+            "--caller",
+            "Draft.xlsm",
+            "--excel-hwnd",
+            "1234",
+            "--stage",
+            "P3",
+        ],
+    )
+    monkeypatch.setattr(
+        "builtins.input", lambda *args: pytest.fail("No implicit pause")
+    )
+
+    assert workflow.main() == 0
+
+    assert received == [caller]
+    console = capsys.readouterr().out
+    assert "Property Stage 3" in console
+    assert "saved NoteVal" in console
+    assert str(output) in console
+    assert all(reporter.joined for reporter in reporting_threads)
+
+
+def test_main_stage_p4_dispatches_only_to_property_stage_four(
+    monkeypatch: pytest.MonkeyPatch,
+    console_logger: logging.Logger,
+    reporting_threads: list[Any],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import bonds_lite_input as workflow
+
+    caller = SimpleNamespace(
+        fullname="Draft.xlsm", api=SimpleNamespace(FullName="Draft.xlsm")
+    )
+    app = SimpleNamespace(api=SimpleNamespace(Hwnd=1234), books=[caller])
+    output = Path("SST Output_Test/Property/JRL_NoteVal_Test.xlsb")
+    received: list[Any] = []
+
+    def run_property_stage_four(book: Any) -> Path:
+        received.append(book)
+        return output
+
+    def forbidden(_book: Any) -> Path:
+        pytest.fail("P4 must not dispatch to another stage")
+
+    monkeypatch.setitem(sys.modules, "xlwings", SimpleNamespace(apps=[app]))
+    monkeypatch.setitem(
+        sys.modules,
+        "sst_property_stage_four",
+        SimpleNamespace(run_property_stage_four=run_property_stage_four),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "sst_property_stage_three",
+        SimpleNamespace(run_property_stage_three=forbidden),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "bonds_lite_input",
+            "--caller",
+            "Draft.xlsm",
+            "--excel-hwnd",
+            "1234",
+            "--stage",
+            "P4",
+        ],
+    )
+    monkeypatch.setattr(
+        "builtins.input", lambda *args: pytest.fail("No implicit pause")
+    )
+
+    assert workflow.main() == 0
+
+    assert received == [caller]
+    console = capsys.readouterr().out
+    assert "Property Stage 4" in console
+    assert "ran NoteVal" in console
+    assert str(output) in console
+    assert all(reporter.joined for reporter in reporting_threads)
+
+
 def test_main_installs_property_stage_one_controls_from_cli(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8246,7 +8570,79 @@ def test_main_installs_property_stage_two_controls_from_cli(
     assert any(str(backup) in message for message in messages)
 
 
-@pytest.mark.parametrize("stage", [None, "1", "2", "3", "4", "P1", "P2"])
+def test_main_installs_property_stage_three_controls_from_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bonds_lite_input as workflow
+
+    backup = Path("Draft_backup.xlsm")
+    received: list[Path] = []
+    messages: list[str] = []
+
+    def install(caller: Path) -> Path:
+        received.append(caller)
+        return backup
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sst_property_stage_three",
+        SimpleNamespace(install_property_stage_three_controls=install),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["bonds_lite_input", "--install-property-stage-three", "Draft.xlsm"],
+    )
+    monkeypatch.setattr(
+        workflow.logger,
+        "info",
+        lambda message, *args: messages.append(str(message)),
+    )
+
+    assert workflow.main() == 0
+
+    assert received == [Path("Draft.xlsm")]
+    assert any("Property Stage 3 controls installed" in message for message in messages)
+    assert any(str(backup) in message for message in messages)
+
+
+def test_main_installs_property_stage_four_controls_from_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bonds_lite_input as workflow
+
+    backup = Path("Draft_backup.xlsm")
+    received: list[Path] = []
+    messages: list[str] = []
+
+    def install(caller: Path) -> Path:
+        received.append(caller)
+        return backup
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sst_property_stage_four",
+        SimpleNamespace(install_property_stage_four_controls=install),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["bonds_lite_input", "--install-property-stage-four", "Draft.xlsm"],
+    )
+    monkeypatch.setattr(
+        workflow.logger,
+        "info",
+        lambda message, *args: messages.append(str(message)),
+    )
+
+    assert workflow.main() == 0
+
+    assert received == [Path("Draft.xlsm")]
+    assert any("Property Stage 4 controls installed" in message for message in messages)
+    assert any(str(backup) in message for message in messages)
+
+
+@pytest.mark.parametrize("stage", [None, "1", "2", "3", "4", "P1", "P2", "P3", "P4"])
 @pytest.mark.parametrize("outcome", ["success", "failure", "interrupted"])
 def test_main_console_messages_identify_the_selected_stage(
     monkeypatch: pytest.MonkeyPatch,
@@ -8292,6 +8688,16 @@ def test_main_console_messages_identify_the_selected_stage(
         "sst_property_stage_two",
         SimpleNamespace(run_property_stage_two=run),
     )
+    monkeypatch.setitem(
+        sys.modules,
+        "sst_property_stage_three",
+        SimpleNamespace(run_property_stage_three=run),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "sst_property_stage_four",
+        SimpleNamespace(run_property_stage_four=run),
+    )
 
     assert workflow.main() == (0 if outcome == "success" else 1)
 
@@ -8310,7 +8716,7 @@ def test_main_console_messages_identify_the_selected_stage(
         assert f"{selected} interrupted by the user" in console
     assert "Bonds Lite input started" not in console
     assert "Bonds Lite input failed" not in console
-    expected_interval = 60.0 if stage == "P2" else 5.0
+    expected_interval = 60.0 if stage in ("P2", "P4") else 5.0
     assert [reporter.args[2] for reporter in reporting_threads] == [expected_interval]
     assert all(reporter.joined for reporter in reporting_threads)
 
@@ -9184,11 +9590,27 @@ def test_packaged_model_entry_preflight_imports_runtime_without_batch(
             "Starting Property Stage 2...",
         ),
         (
+            ["--caller", "Draft.xlsm", "--stage", "P3"],
+            "Starting Property Stage 3...",
+        ),
+        (
+            ["--caller", "Draft.xlsm", "--stage", "P4"],
+            "Starting Property Stage 4...",
+        ),
+        (
             ["--install-property-stage-one", "Draft.xlsm"],
             "Starting Bonds Lite controller...",
         ),
         (
             ["--install-property-stage-two", "Draft.xlsm"],
+            "Starting Bonds Lite controller...",
+        ),
+        (
+            ["--install-property-stage-three", "Draft.xlsm"],
+            "Starting Bonds Lite controller...",
+        ),
+        (
+            ["--install-property-stage-four", "Draft.xlsm", "--caller", "Draft.xlsm"],
             "Starting Bonds Lite controller...",
         ),
         (["--caller", "Draft.xlsm", "--stage=4"], "Starting Stage 4..."),
@@ -9959,6 +10381,46 @@ def test_read_output_suffix_uses_workbook_name() -> None:
     assert workflow.read_output_suffix(book) == "7"
     with pytest.raises(BondsLiteError, match="SST_output_folder_suffix"):
         workflow.read_output_suffix(_named_control_book({}))
+
+
+def test_read_entity_returns_trimmed_value() -> None:
+    import bonds_lite_input as workflow
+
+    assert workflow.read_entity(_named_control_book({"SST_Entity": " JRL "})) == "JRL"
+
+
+def test_read_entity_missing_name_explains_installer() -> None:
+    import bonds_lite_input as workflow
+
+    with pytest.raises(BondsLiteError, match="--install-property-stage-three"):
+        workflow.read_entity(_named_control_book({}))
+
+
+@pytest.mark.parametrize("value", [None, "", "   ", 5])
+def test_read_entity_rejects_blank_or_non_text(value: Any) -> None:
+    import bonds_lite_input as workflow
+
+    with pytest.raises(BondsLiteError, match="SST_Entity"):
+        workflow.read_entity(_named_control_book({"SST_Entity": value}))
+
+
+@pytest.mark.parametrize("value", ["JR/L", "A:B", "NAME."])
+def test_read_entity_rejects_invalid_filename_characters(value: str) -> None:
+    import bonds_lite_input as workflow
+
+    with pytest.raises(BondsLiteError, match="SST_Entity"):
+        workflow.read_entity(_named_control_book({"SST_Entity": value}))
+
+
+def test_entity_output_name_prefixes_and_does_not_double() -> None:
+    import bonds_lite_input as workflow
+
+    assert workflow.entity_output_name(
+        "JRL", Path("LTM Note Valuation Tool v1.40.xlsb"), "Test"
+    ) == "JRL_LTM Note Valuation Tool v1.40_Test.xlsb"
+    assert workflow.entity_output_name("JRL", Path("JRL_X.xlsb"), "Test") == (
+        "JRL_X_Test.xlsb"
+    )
 
 
 def test_allocate_stress_folder_creates_root_and_stress_folder(tmp_path: Path) -> None:

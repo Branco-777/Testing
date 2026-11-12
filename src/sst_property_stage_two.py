@@ -180,12 +180,14 @@ def write_property_stage_two_audit(caller: Any, fields: dict[str, object]) -> No
         caller.app.api.EnableEvents = events
 
 
-def _resolve_handoff_path(value: object, caller_path: Path) -> Path:
-    """Resolve a saved Stage 1 path relative to the Draft when necessary."""
+def _resolve_handoff_path(
+    value: object,
+    caller_path: Path,
+    handoff_description: str = "Property Stage 1 output workbook",
+) -> Path:
+    """Resolve a saved stage handoff relative to the Draft when necessary."""
     if not isinstance(value, str) or not value.strip():
-        raise PropertyStageTwoError(
-            "Property Stage 1 has no successful output workbook handoff"
-        )
+        raise PropertyStageTwoError(f"{handoff_description} handoff is missing")
     path = Path(os.path.expandvars(value.strip())).expanduser()
     if not path.is_absolute():
         path = caller_path.parent / Path(str(path).replace("/", os.sep))
@@ -193,11 +195,11 @@ def _resolve_handoff_path(value: object, caller_path: Path) -> Path:
         resolved = path.resolve(strict=True)
     except OSError as error:
         raise PropertyStageTwoError(
-            f"Property Stage 1 output workbook does not exist: {path}"
+            f"{handoff_description} does not exist: {path}"
         ) from error
     if not resolved.is_file():
         raise PropertyStageTwoError(
-            f"Property Stage 1 output path is not a file: {resolved}"
+            f"{handoff_description} path is not a file: {resolved}"
         )
     try:
         size = resolved.stat().st_size
@@ -205,15 +207,13 @@ def _resolve_handoff_path(value: object, caller_path: Path) -> Path:
             workbook_file.read(1)
     except OSError as error:
         raise PropertyStageTwoError(
-            f"Property Stage 1 output workbook is unreadable: {resolved}"
+            f"{handoff_description} is unreadable: {resolved}"
         ) from error
     if size == 0:
-        raise PropertyStageTwoError(
-            f"Property Stage 1 output workbook is empty: {resolved}"
-        )
+        raise PropertyStageTwoError(f"{handoff_description} is empty: {resolved}")
     if resolved.suffix.casefold() not in {".xlsb", ".xlsm"}:
         raise PropertyStageTwoError(
-            "Property Stage 1 output must be a macro-enabled .xlsb or .xlsm workbook"
+            f"{handoff_description} must be a macro-enabled .xlsb or .xlsm workbook"
         )
     return resolved
 
@@ -255,14 +255,14 @@ def _excel_datetime(value: object, name: str) -> datetime:
     raise PropertyStageTwoError(f"{name} is missing or is not a valid timestamp")
 
 
-def _excel_now(application: Any) -> datetime:
+def _excel_now(application: Any, workbook_label: str = "LTM") -> datetime:
     """Capture the invocation instant using the owned Excel instance's clock."""
     try:
         # WorksheetFunction has no Now method; Evaluate returns NOW() as a serial date.
         value = application.api.Evaluate("NOW()")
     except Exception as error:
         raise PropertyStageTwoError(
-            f"Cannot read the LTM Excel invocation time: {error}"
+            f"Cannot read the {workbook_label} Excel invocation time: {error}"
         ) from error
     return _excel_datetime(value, "Excel invocation time")
 
@@ -528,7 +528,12 @@ def _validate_local_run_settings(workbook: Any) -> None:
         )
 
 
-def _excel_local_path(workbook: Any, caller: Any, caller_path: Path) -> Path:
+def _excel_local_path(
+    workbook: Any,
+    caller: Any,
+    caller_path: Path,
+    workbook_label: str = "LTM workbook",
+) -> Path:
     """Map Excel's FullName to a local path through the Draft's own location.
 
     xlwings maps synced SharePoint URLs by searching for the file name, which
@@ -542,13 +547,21 @@ def _excel_local_path(workbook: Any, caller: Any, caller_path: Path) -> Path:
     if re.match(r"^[a-z]+://", caller_raw, re.IGNORECASE):
         folder = caller_raw.rsplit("/", 1)[0] + "/"
         if value.casefold().startswith(folder.casefold()):
-            return caller_path.parent.joinpath(*value[len(folder):].split("/")).resolve()
+            return caller_path.parent.joinpath(
+                *value[len(folder) :].split("/")
+            ).resolve()
     raise PropertyStageTwoError(
-        f"Cannot map the LTM workbook location to a local path: {raw}"
+        f"Cannot map the {workbook_label} location to a local path: {raw}"
     )
 
 
-def _ensure_workbook_not_open(path: Path, caller: Any, caller_path: Path) -> None:
+def _ensure_workbook_not_open(
+    path: Path,
+    caller: Any,
+    caller_path: Path,
+    stage_label: str = "Property Stage 2",
+    workbook_label: str = "LTM workbook",
+) -> None:
     """Reject a target already open in any Excel instance before writing."""
     try:
         import xlwings as xw
@@ -557,38 +570,44 @@ def _ensure_workbook_not_open(path: Path, caller: Any, caller_path: Path) -> Non
         for application in xw.apps:
             for workbook in application.books:
                 try:
-                    opened = _excel_local_path(workbook, caller, caller_path)
+                    opened = _excel_local_path(
+                        workbook, caller, caller_path, workbook_label
+                    )
                 except PropertyStageTwoError:
                     continue
                 if os.path.normcase(str(opened)) == wanted:
                     raise PropertyStageTwoError(
-                        f"Close {path.name} in Excel before running Property Stage 2"
+                        f"Close {path.name} in Excel before running {stage_label}"
                     )
     except PropertyStageTwoError:
         raise
     except Exception as error:
         raise PropertyStageTwoError(
-            f"Cannot verify that the LTM workbook is closed: {error}"
+            f"Cannot verify that the {workbook_label} is closed: {error}"
         ) from error
 
 
 def _require_expected_workbook(
-    workbook: Any, expected_path: Path, caller: Any, caller_path: Path
+    workbook: Any,
+    expected_path: Path,
+    caller: Any,
+    caller_path: Path,
+    workbook_label: str = "LTM workbook",
 ) -> None:
     """Confirm Excel opened the exact Stage 1 handoff in the owned instance."""
     try:
-        actual_path = _excel_local_path(workbook, caller, caller_path)
+        actual_path = _excel_local_path(workbook, caller, caller_path, workbook_label)
     except PropertyStageTwoError:
         raise
     except Exception as error:
         raise PropertyStageTwoError(
-            f"Cannot verify the opened LTM workbook path: {error}"
+            f"Cannot verify the opened {workbook_label} path: {error}"
         ) from error
     if os.path.normcase(str(actual_path)) != os.path.normcase(
         str(expected_path.resolve(strict=True))
     ):
         raise PropertyStageTwoError(
-            f"Excel opened an unexpected LTM workbook: {actual_path}"
+            f"Excel opened an unexpected {workbook_label}: {actual_path}"
         )
 
 

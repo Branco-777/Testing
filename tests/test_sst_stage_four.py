@@ -872,7 +872,7 @@ def test_packaged_macalc_config_resolves_shared_component(
         release_root
         / "components"
         / "MACalcModel"
-        / macalc_fingerprint
+        / macalc_fingerprint[:12]
     )
     app = component / "app"
     app.mkdir(parents=True)
@@ -901,7 +901,7 @@ def test_packaged_macalc_config_resolves_shared_component(
         release_root
         / "components"
         / "BondsLiteModel"
-        / model_fingerprint
+        / model_fingerprint[:12]
     )
     model_app = model_component / "app"
     model_app.mkdir(parents=True)
@@ -925,7 +925,7 @@ def test_packaged_macalc_config_resolves_shared_component(
         json.dumps(
             {
                 "release_id": "shared-release",
-                "layout_version": 2,
+                "layout_version": 3,
                 "component_fingerprints": {
                     "BondsLiteModel": model_fingerprint,
                     "MACalcModel": macalc_fingerprint,

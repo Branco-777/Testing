@@ -12,7 +12,7 @@ def _startup_message(arguments: list[str]) -> str:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--caller")
     parser.add_argument(
-        "--stage", choices=("1", "2", "3", "4", "P1", "P2"), default="1"
+        "--stage", choices=("1", "2", "3", "4", "P1", "P2", "P3", "P4"), default="1"
     )
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--install-button")
@@ -20,6 +20,8 @@ def _startup_message(arguments: list[str]) -> str:
     parser.add_argument("--install-stage-four")
     parser.add_argument("--install-property-stage-one")
     parser.add_argument("--install-property-stage-two")
+    parser.add_argument("--install-property-stage-three")
+    parser.add_argument("--install-property-stage-four")
     parser.add_argument("-h", "--help", action="store_true")
     options, _ = parser.parse_known_args(arguments)
     if not options.caller or any(
@@ -30,6 +32,8 @@ def _startup_message(arguments: list[str]) -> str:
             options.install_stage_four,
             options.install_property_stage_one,
             options.install_property_stage_two,
+            options.install_property_stage_three,
+            options.install_property_stage_four,
             options.help,
         )
     ):
@@ -38,6 +42,10 @@ def _startup_message(arguments: list[str]) -> str:
         return "Starting Property Stage 1..."
     if options.stage == "P2":
         return "Starting Property Stage 2..."
+    if options.stage == "P3":
+        return "Starting Property Stage 3..."
+    if options.stage == "P4":
+        return "Starting Property Stage 4..."
     return f"Starting Stage {options.stage}..."
 
 

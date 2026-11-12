@@ -1038,3 +1038,266 @@ The packaged controller and a new packaged MACalc model app are built, and the r
 - Exclude Numba and llvmlite from MACalc — not chosen by the user.
 - Retain CBC binaries for 32-bit Windows, Linux and macOS — not needed for the confirmed 64-bit Windows target.
 **Rationale:** The user chose to leave Numba in place and confirmed that 64-bit Windows can be the only supported target. The remaining solver trim avoids unused platform binaries without changing the model's Numba dependencies.
+
+### Decision 112: Property Stage 1 Copies Base Plus One Flag-Selected ScenFlipper Block As Values (2026-11-11)
+**Question:** How should Property Stage 1 build the LTM Flash I. ScenFlipper now that the Draft holds Base, Property, Interest and Interest_Property blocks?
+**Decided by:** User (block selection and stress checks), 11 November 2026; agent (values-only copy, layout checks).
+**Choice:** Read `SST_Interest_standalone` and `SST_Property_standalone`. Property Stages 1 and 2 still start only when `SST_Property_standalone` is TRUE (user, 11 November 2026). The block selection supports any non-empty flag combination so a future Interest-only workstream can reuse it. Copy Draft rows 1-5, the `Base` block and the block whose column J `scen desc` is `Interest`, `Property` or `Interest_Property`. Every selected stress row must have a non-zero value in K:M (Interest) and/or Q:R (Property); stress columns of the non-selected type, and all of K:M and Q:R in Base, must be blank or zero. Base must come first, blocks must be contiguous and equal in size, B2 must equal the copied scenario count and column A must number 1..B2. The Draft ScenFlipper stress cells stay as formulas linked to the I. Control inputs (user requirement). The earlier rule that rejected Draft formulas referring to other sheets is removed. LTM Flash receives their calculated values so that names and links back to the Draft are not created. The Draft is recalculated before reading.
+**Alternatives considered:**
+- Copy the whole used range with formats and formulas — rejected; the stress cells use Draft names such as `SST_Prop_LSE_stress`.
+- Check stress columns once per block rather than per row — not chosen; every stressed scenario should carry the stress.
+**Rationale:** Selection by `scen desc` follows the Draft layout and keeps the existing template, name and link verification valid.
+
+## Property Stage 3 Decisions (Prepare NoteVal)
+
+Decisions 113-120 were approved by the user on 11 November 2026.
+
+### Decision 113: Property Stage 3 Prepares NoteVal But Does Not Run It (2026-11-11)
+**Question:** Should Property Stage 3 only repoint and save NoteVal, or also run its `Run` macro?
+**Decided by:** User, 11 November 2026 (Q1: the run belongs in Property Stage 4 so that the NoteVal setup can be checked after Stage 3).
+**Choice:** Stage 3 repoints the Flash links, sets `I_ValuationDate`, recalculates, verifies and saves. It never runs a NoteVal macro: AutomationSecurity is forced off while the copy is open. Property Stage 4 runs `modControl.Run`, following the Property Stage 2 pattern, and takes its input from the Stage 3 audit.
+**Alternatives considered:**
+- Run the macro inside Stage 3 - deferred; it takes about 9 minutes, uses five other external sources, and needs its own completion checks like Stage 2.
+**Rationale:** The user's stated objective is to update and save the copy. Keeping preparation and execution separate matches Property Stages 1 and 2 and keeps failures easy to recover from.
+
+### Decision 114: Repoint With Workbook.ChangeLink Under An Exact-Scope Check (2026-11-11)
+**Question:** How should the NoteVal links to the old LTM Flash workbook be replaced?
+**Decided by:** User, 11 November 2026 (approved with Decisions 113-120).
+**Choice:** Identify the old Flash source from `I_LTM_IFRS_Value`. Fail unless the formulas referencing it are exactly `'I. Control'!D12` plus the `'I. Inputs'` C/E/G formulas and I10 (2,162 cells in v1.40). Then call `Workbook.ChangeLink(old, new_flash, xlLinkTypeExcelLinks)`. Afterwards verify each formula against a pure `rewrite_external_reference` expectation, the link list (old source gone, other five unchanged) and the values read from the Flash workbook.
+**Alternatives considered:**
+- Text replace of the path in each formula - rejected as the primary mechanism; it is slower over 2,162 cells and fragile with URL/UNC/relative forms. It is kept only as the pure verification oracle.
+- Paste values from Flash - rejected; the user wants live formulas that keep their cell references.
+**Rationale:** The workbook-wide scan showed the user's scope is exactly every reference to the Flash source, so a single ChangeLink is equivalent and preserves formula structure.
+
+### Decision 115: Stage 3 Takes Its Flash Workbook From The Stage 2 Audit (2026-11-11)
+**Question:** How does Stage 3 find the LTM Flash workbook run by Stage 2?
+**Decided by:** User, 11 November 2026 (approved with Decisions 113-120).
+**Choice:** Require `SST_Property_standalone` TRUE, `SST_PropStage2_Status` = `Succeeded`, `SST_PropStage2_InputWorkbook` equal to `SST_PropStage1_LastSuccessfulOutput` and existing, and `SST_PropStage2_LastSuccessfulRun` no earlier than `SST_PropStage1_Finish`.
+**Alternatives considered:**
+- Pick the newest Flash file in the Property folder - rejected; it is ambiguous and not auditable.
+**Rationale:** The Stage 1 -> Stage 2 handoff already works this way and records the exact path.
+
+### Decision 116: Name The Draft Entity Cell SST_Entity (2026-11-11)
+**Question:** Where should the stages read the entity used as a filename prefix?
+**Decided by:** User, 11 November 2026 (approved with Decisions 113-120).
+**Choice:** The Property installers add `SST_Entity` -> `'I. Control'!$D$9` idempotently. A shared `read_entity` trims the value, requires non-empty text and rejects characters invalid in Windows filenames.
+**Alternatives considered:**
+- Read `D9` by address or by its label - rejected; the user has moved Draft cells before, and every other control is read by name.
+**Rationale:** This is consistent with the existing named-control convention and fails clearly if the entity is blank.
+
+### Decision 117: Prefix Property Outputs As <Entity>_<Template Stem>_<Suffix> (2026-11-11)
+**Question:** What should the Stage 1 and Stage 3 output files be called, and can Stage 3 overwrite?
+**Decided by:** User, 11 November 2026 (Q3: keep the suffix; Q5: overwrite on rerun, as Stage 1 does for LTM Flash).
+**Choice:** Both stages use `f"{entity}_{stem}_{suffix}{ext}"`, for example `JRL_LTM_FlashModel_v3.2a_Test.xlsb` and `JRL_LTM Note Valuation Tool v1.40_Test.xlsb`. The prefix is not added again if the stem already starts with `<entity>_`. Stage 3 saves beside the Flash workbook and replaces an earlier Stage 3 output only after the new copy is verified (temp file in the same folder, then `os.replace`). Only the NoteVal file is replaced. The Property folder is not replaced because it holds the Flash workbook; a Stage 1 rerun still replaces the whole folder.
+**Alternatives considered:**
+- Drop the suffix from the NoteVal name - not chosen; it would make NoteVal inconsistent with the Stage 1 output name.
+- Refuse when the output already exists - rejected; reruns of Stage 3 on the same Flash run must be possible.
+**Rationale:** The user asked for "JRL_rest of filename" in both stages; keeping the existing suffix convention needs the fewest changes.
+
+### Decision 118: Property Stage 3 Controls (2026-11-11)
+**Question:** Where do the Stage 3 panel, button and CLI stage live?
+**Decided by:** User, 11 November 2026 (approved with Decisions 113-120).
+**Choice:** Panel `SST_PropStage3_Panel` = `'I. Control'!AB35:AI45` (below Stage 2), button `btnPrepareNoteVal`, VBA `PrepareNoteVal` -> `LaunchBondsLite "P3"`, CLI `--stage P3` and `--install-property-stage-three`, plus packaging hidden import `sst_property_stage_three`.
+**Alternatives considered:** Reuse the Stage 2 panel - rejected; each stage keeps its own audit.
+**Rationale:** This mirrors the Credit Stage 3 position (`O35:V45`) and the Property Stage 2 installer pattern.
+
+### Decision 119: Write The Draft Valuation Date Unchanged, Warning On Weekends (2026-11-11)
+**Question:** How should `I_ValuationDate` be set, given that NoteVal asks for the last working day?
+**Decided by:** User, 11 November 2026 (Q4: weekend dates are not expected; it must not stop the run).
+**Choice:** Write the Draft `I_Valuation_Date` as a date value and log a warning if it is a Saturday or Sunday. UK bank holidays are not checked.
+**Alternatives considered:**
+- Fail on a weekend - not chosen; Stage 1 already gave Flash the same date, so a failure here would be late.
+- Roll back to the previous working day - rejected; Flash and NoteVal dates would differ.
+**Rationale:** Flash and NoteVal stay on one date, and a likely input mistake is still flagged.
+
+### Decision 120: Stage 3 Requires NoteVal's Flash Columns To Be The First Stressed Scenario (2026-11-11)
+**Question:** NoteVal reads fixed Flash columns (`CJ:CO`, scenario 9). How should Stage 3 make sure this is the stressed IFRS scenario?
+**Decided by:** User, 11 November 2026 (NoteVal values the stressed IFRS scenario; the check is wanted).
+**Choice:** Before changing any links, open the Flash workbook read-only and require all of the following, failing with the scenario number and description found:
+- Row 1 above the first referenced column (`CJ`) shows scenario 9 in both `O. CFOutput` and `O. PVOutput`.
+- In the Flash `I. ScenFlipper`, scenario 9's `scen desc` is `Interest`, `Property` or `Interest_Property`.
+- Scenario 8 is `Base`.
+**Alternatives considered:**
+- Rewrite the NoteVal column references to follow the first stress scenario wherever it falls - rejected; it changes NoteVal's formula structure, which the user wants preserved.
+- No check - rejected by the user.
+**Rationale:** NoteVal picks the scenario by column position, so a change in the Base block size would silently value the wrong scenario.
+
+## Agent-made decisions pending user approval
+
+### Decision 121: Read Protected NoteVal Formulas Without Changing Sheet Protection (2026-11-11)
+**Question:** How should Stage 3 inspect workbook formulas when Excel rejects `SpecialCells(xlCellTypeFormulas)` on a protected NoteVal sheet?
+**Decided by:** Agent (pending user approval).
+**Choice:** If and only if `SpecialCells` reports a protected-sheet restriction, read the sheet's `UsedRange.Formula` grid and collect formula cells from that read-only snapshot. Continue to fail explicitly for other `SpecialCells` errors or if the fallback read fails. Do not unprotect sheets.
+**Alternatives considered:**
+- Fail on protected sheets - rejected; the real NoteVal workbook has a protected `EUC Coversheet` and Stage 3 must scan the complete workbook.
+- Unprotect the sheet during scanning - rejected; it is unnecessary for reading formulas and may require a password or change workbook state.
+- Read every sheet's full used range unconditionally - rejected; the sparse `SpecialCells` scan remains more efficient for normal sheets.
+**Rationale:** The opt-in Excel integration test reproduced the protection restriction on the real NoteVal copy. A narrowly gated full-grid read preserves protection and maintains workbook-wide scope verification.
+**Approved by:** Decision 123.
+
+### Decision 122: Verify NoteVal I10 Using Excel's Implicit Intersection (2026-11-11)
+**Question:** The approved plan specifies `I10 == -SUM(CFOutput!CT3:DM722)`, but the real Excel integration test calculates I10 as `-CFOutput!CT3`. Which result should Stage 3 verify?
+**Decided by:** Agent (pending user approval).
+**Choice:** Verify I10 against the top-left cell of its unchanged external range, `-CFOutput!CT3`, matching the value Excel actually calculates for this single-cell formula. Keep the formula text and referenced range unchanged.
+**Alternatives considered:**
+- Require the planned sum - rejected; on the real workbook copy Excel returned `-2,513,081.978981254` while the range sum was `-15,611,860,477.150377`, so the check would reject the workbook despite a correct link.
+- Rewrite the formula to add `SUM` - rejected; that changes user formula structure and behavior, contrary to Decision 114.
+**Rationale:** The integration test opened disposable copies, repointed the link, and ran `CalculateFull`. The I10 formula contains a bare multi-cell range, and Excel returns its top-left value under this workbook's formula semantics. Verifying the actual scalar cell preserves the approved formula while detecting a stale or incorrect link.
+**Superseded by:** Decision 124 — the user requires a range starting at I10 rather than verification of a single value.
+
+## User decisions
+
+### Decision 123: Approve Protected-Sheet Formula Scanning (2026-11-11)
+**Question:** Should Stage 3 use the read-only protected-sheet formula scan described in Decision 121?
+**Decided by:** User.
+**Choice:** Approve Decision 121 without changing sheet protection.
+**Alternatives considered:**
+- Reject the fallback and fail on protected sheets — the real NoteVal template would not pass the workbook-wide scan.
+- Unprotect sheets or use a full-grid scan for every sheet — neither is necessary for the approved fallback.
+**Rationale:** The user approved the narrowly gated, read-only fallback.
+
+### Decision 124: Require a NoteVal Range Starting at I10 (2026-11-11)
+**Question:** Should Stage 3 accept only I10's top-left calculated value, or produce a range starting at I10 from the Flash reference?
+**Decided by:** User.
+**Choice:** Reject and supersede Decision 122. The user wants a range set from I10, not just the value `-CT3`. The workbook's existing layout and the required Excel representation must be established before implementation.
+**Alternatives considered:**
+- Verify only the top-left value — rejected by the user.
+- Use a single aggregate sum — this would not produce the requested range.
+**Rationale:** The full referenced range, rather than a single result, is required from the I10 starting cell.
+
+### Decision 125: Limit Flash-Link Formula Scanning To Input And Control Sheets (2026-11-11)
+**Question:** Which NoteVal sheets can contain the relevant Flash link and should Stage 3 inspect for formulas?
+**Decided by:** User.
+**Choice:** Inspect formulas only on `I. Inputs` and `I. Control`, comparing sheet names case-insensitively. Ignore all other sheets, including their formulas and UsedRanges.
+**Alternatives considered:**
+- Scan every workbook sheet — rejected; only `I. Inputs` and `I. Control` can contain the relevant link.
+**Rationale:** Restricting the scan to the two relevant sheets avoids unnecessary UsedRange access elsewhere while preserving checks on both possible locations for the Flash link.
+
+## Property Stage 4 Decisions (Run NoteVal)
+
+The user asked for Property Stage 4 to run the NoteVal workbook produced by Stage 3. No question tool was available, so the agent initially made the choices below. The user approved Decisions 126–131 on 11 November 2026; see the approval record.
+
+## Agent-made decisions
+
+### Decision 126: Stage 4 Takes NoteVal From A Current Stage 3 Audit (2026-11-11)
+**Question:** How does Stage 4 find the NoteVal workbook, and when is that workbook too old to run?
+**Decided by:** Agent (pending user approval).
+**Choice:** All of the following must hold:
+- `SST_PropStage3_Status` = `Succeeded`.
+- `SST_PropStage3_LastSuccessfulOutput` resolves to an existing file.
+- `SST_PropStage3_InputWorkbook` equals `SST_PropStage2_InputWorkbook`.
+- `SST_PropStage2_LastSuccessfulRun` is no later than `SST_PropStage3_Finish`.
+
+**Alternatives considered:**
+- Use only the Stage 3 output path - rejected; a Stage 2 rerun after Stage 3 would leave NoteVal with outdated Flash values.
+- Check the Flash file's modification time - rejected; timestamps on OneDrive files are unreliable, and the audit records the actual run.
+
+**Rationale:** This reuses the audit handoff from Stage 1 to Stage 3 (Decision 115) and guarantees that NoteVal was prepared from the current Flash run.
+
+### Decision 127: Run NoteVal In Place With A Verified Restore (2026-11-11)
+**Question:** Should Stage 4 overwrite the Stage 3 output or write a new file?
+**Decided by:** Agent (pending user approval).
+**Choice:** Stage 4 follows the Property Stage 2 pattern:
+- Back the workbook up to a temporary folder.
+- Run it in a separate, visible Excel instance owned by Stage 4, with macros enabled and AutoSave off.
+- Save only after verification.
+- If any failure changes the file, restore the backup and check its hash.
+
+**Alternatives considered:**
+- Save as a new "_Run" file - rejected; it would duplicate Stage 3's naming and audit handoff, and Stage 3 can always recreate the prepared file.
+
+**Rationale:** Stage 2 already runs Flash this way, so failures leave the prepared workbook as it was.
+
+### Decision 128: Do Not Update NoteVal External Links During Stage 4 (2026-11-11)
+**Question:** Should Stage 4 refresh NoteVal's external links (Flash and five other sources) before running?
+**Decided by:** Agent (pending user approval).
+**Choice:** Open with `update_links=False`. The macro uses the Flash values that Stage 3 cached and verified, and the cached values for the other five sources.
+**Alternatives considered:**
+- Update all links on open - rejected for now. It reads the five shared sources unattended, and OneDrive or permission failures (seen with the NoteVal template) could stall a run behind a prompt.
+
+**Rationale:** Stage 3 already recalculated against the live Flash and verified every Flash cell. Stage 2 also opens its workbook with `update_links=False`.
+
+### Decision 129: Stage 4 Completion Checks (2026-11-11)
+**Question:** How does Stage 4 know NoteVal's `Run` macro finished?
+**Decided by:** Agent (pending user approval).
+**Choice:**
+- `I_StartTime_1` and `I_EndTime_1` must be dates.
+- `I_StartTime_1` must be no earlier than Excel `Now()` captured just before the call, less two seconds.
+- `I_EndTime_1` must be no earlier than `I_StartTime_1`.
+- Every GoalSeek target cell must be a finite number:
+  - `O. MAC MI!D12`.
+  - On `C. Note Valuation ex Hedge`: `F12`, `H12`, `AB31:AM31`, `AF45`, `AQ33:AQ36` and `AB57:AM57`.
+  - On `C. Note Valuation`: `T23`, `T50` and `T56`.
+- Residuals are logged but are not checked against a tolerance.
+
+**Alternatives considered:**
+- Require every residual to be near zero - deferred; the monetary scale is unknown, and GoalSeek's own tolerance could cause false failures. Logged values allow a threshold to be set later.
+
+**Rationale:** The macro writes `I_EndTime_1` only after all five solvers have finished, so a fresh end time proves the macro completed. The finite-number check catches broken inputs.
+
+### Decision 130: NoteVal Watchdog With A 30-Minute Limit (2026-11-11)
+**Question:** How should Stage 4 handle a NoteVal run that does not finish? Two rating loops in the macro can loop forever.
+**Decided by:** Agent (pending user approval).
+**Choice:**
+- The default limit is 30 minutes; a typical run takes about 9.
+- `SST_P4_TIME_LIMIT_MINUTES` overrides the limit, but only when running from source.
+- A heartbeat is logged every 5 minutes.
+- At the limit, the watchdog prompts "[W]ait 30 more minutes or [A]bort". Abort terminates only the Excel PID owned by Stage 4; the backup is then restored and the run is audited `Timed Out`.
+
+**Alternatives considered:**
+- No watchdog - rejected; a hung loop would block the console indefinitely.
+- Abort automatically - rejected; Stage 2 lets the user decide, because long runs can still be valid.
+
+**Rationale:** This matches the Stage 2 time-limit approach (prompt and exact-PID termination) without its LTM runner checks.
+
+### Decision 131: Property Stage 4 Controls (2026-11-11)
+**Question:** Where do the Stage 4 panel, button and CLI stage live?
+**Decided by:** Agent (pending user approval).
+**Choice:**
+- Panel `SST_PropStage4_Panel` = `'I. Control'!AB48:AI58`, below Stage 3.
+- Fields `SST_PropStage4_{LastRun, Start, Finish, Elapsed, User, Status, InputWorkbook, LastSuccessfulRun}`.
+- Button `btnRunNoteVal`, whose VBA `RunNoteVal` calls `LaunchBondsLite "P4"`.
+- CLI options `--stage P4` and `--install-property-stage-four`.
+- Packaging hidden import `sst_property_stage_four`.
+
+**Alternatives considered:**
+- Reuse the Stage 3 panel - rejected; each stage keeps its own audit (Decision 118).
+
+**Rationale:** This keeps the layout of Stages 2 and 3, which use 13-row spacing.
+
+## User Approval (2026-11-11)
+
+The user approved Decisions 126–131 as written. The pending-approval status in
+those entries is superseded by this approval record.
+
+The user also authorised installing the Stage 4 controls in the live Draft,
+building and promoting a packaged controller that supports Property Stages 3
+and 4, and completing the setup-guide, automated Excel-test and shared
+error-wording updates.
+
+### Decision 132: Short Shared Component Folders Within MAX_PATH (2026-11-12)
+**Question:** How should shared components be laid out so the Excel launcher can copy them?
+**Context:** From `20261110-shared-v26`, components were published under `components\<name>\<64-character fingerprint>`. Three bundled DLL paths on the central share reached 262–292 characters. Excel's `FileSystemObject` cannot see paths of 260 characters or more, so every packaged update failed with `Path not found`. The launcher fell back silently to `20261109-cache-v25`, which has no P3/P4.
+**Decided by:** User chose the repackaging fix; agent chose the folder length and guard.
+**Choice:**
+- Each component folder is named with the first 12 characters of its fingerprint. `component.id` and `component.json` keep the full fingerprint, so a prefix collision is rejected, not reused.
+- The builder refuses to publish a component if any published path would be 260 characters or longer.
+- `release.json` uses `layout_version` 3. The Python loader and updated VBA launcher also recognise layout version 2's full-fingerprint folders, preserving existing local caches and safe rollback. The layout version 2 releases on the central share still contain paths Excel cannot copy.
+- The Draft's launcher VBA must be reinstalled to read the new layout.
+
+**Alternatives considered:**
+- Copy with `robocopy` from the launcher - rejected as the primary fix; it leaves paths on the share that other Windows tools cannot open.
+- Keep 64-character folders - rejected; the DLL name alone is about 85 characters, so no layout under the current share root fits.
+
+**Rationale:** The longest published path drops from 292 to 240 characters, and the build-time guard stops the problem recurring silently. Retaining full-fingerprint lookup keeps existing local caches readable without weakening the short-path rule for new publications.
+
+## User Approval (2026-11-12)
+
+The user approved promoting the short-path release and reinstalling the
+packaged launcher in the live Draft. Release `20261112-short-paths-v1` was
+initially promoted, then replaced by `20261112-short-paths-v2` after a
+compatibility check exposed the need to keep reading cached full-fingerprint
+components. The live Draft launcher was reinstalled with that compatibility
+support; both NoteVal macros and button actions were verified. The prior
+central pointer was preserved in
+`current.txt.backup-20261112-before-short-paths-v2`.

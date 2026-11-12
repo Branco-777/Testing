@@ -1,12 +1,12 @@
 # Bonds Lite Input Setup And Use
 
-Version 1.3 | 9 November 2026 | Local-cache v24 active; Property Stage 2 safeguards
+Version 1.5 | 12 November 2026 | Central release `20261112-short-paths-v2` active
 
 ## Overview
 
 Generate Bonds Lite Input on the Draft workbook's I. Control sheet starts the workflow through a small VBA launcher. Stage 1 prepares two validated inputs, Bonds and MAP, using one template and one captured set of date/entity/stresses. Both must succeed before the run folder becomes eligible for Stage 2. Stage 2 runs the unchanged folder-based Bonds Lite batch against that exact pair.
 
-The colleague deployment uses frozen controller/model executables cached under the current Windows user's LocalAppData. Draft stays in the user's locally synced SharePoint/OneDrive folder; the launcher resolves that user's local Draft path and attaches to the exact open Excel instance. The central release share is checked once at the first button click in each Excel session. Later clicks use the local cache without network access. Release v25 is active and Stage 1 reads its three path controls through workbook names.
+The colleague deployment uses frozen controller/model executables cached under the current Windows user's LocalAppData. Draft stays in the user's locally synced SharePoint/OneDrive folder; the launcher resolves that user's local Draft path and attaches to the exact open Excel instance. The central release share is checked once at the first button click in each Excel session. Later clicks use the local cache without network access. The active controller supports Property stages P1-P4, and Stage 1 reads its three path controls through workbook names.
 
 ## Prerequisites
 
@@ -23,13 +23,15 @@ The colleague deployment uses frozen controller/model executables cached under t
 
 ### Colleagues: Packaged Runtime
 
-Once the packaged release is built and approved, open the Draft from its local
-OneDrive-synced folder in desktop Excel. The first button click in each Excel
-session checks the central release pointer and copies a changed release into
-LocalAppData, with an Excel status message during copying. The workbook then
-launches the cached controller/model locally. Later clicks in that Excel
-session do not contact the release share. No Python installation or
-environment-variable setup is required.
+Open the Draft from its local OneDrive-synced folder in desktop Excel. The
+first button click in each Excel session checks the central release pointer
+and copies a changed release into LocalAppData, with an Excel status message
+during copying. Before large model-component transfers, the status bar says
+that copying is in progress; if an update fails and a cached release is used,
+the status bar identifies the cached release and a dialog shows the failure
+reason. The workbook then launches the cached controller/model locally. Later
+clicks in that Excel session do not contact the release share. No Python
+installation or environment-variable setup is required.
 
 The packaged Draft launcher strips Windows CR/LF line endings from both the
 central and LocalAppData `current.txt` pointers before validating their release
@@ -42,13 +44,33 @@ existing scenario inputs, templates and output paths as configured; those data
 paths are separate from the application cache. Do not copy application files
 between releases or delete LocalAppData cache folders while a run is active.
 
-**Deployment status:** release `20261109-cache-v25` is active in the central
-pointer since 9 November 2026 (built from `f9071b9`). Property Stage 2 now
-loads the JRC add-in in its own Excel, stops before the macro if `P. Curves`
-is not numeric, and rejects a run whose `O. PVOutput` has no non-zero PVs for
-any scenario. Other stages are unchanged. The controller, model and MACalc
-packaged self-tests passed, and the published executable hashes match
-`release.json`.
+**Deployment status:** release `20261112-short-paths-v2` is active in the
+central pointer since 12 November 2026. Its controller includes Property P3
+and P4, supports both cached component layouts, and reuses the unchanged Bonds
+Lite Model and MACalc components. All three packaged self-tests passed and
+the published executable hashes match `release.json`. The shared component
+folders use 12-character fingerprint prefixes; the longest published path is
+240 characters. The build used the current working tree and is not associated
+with a Git commit. The live Draft launcher was reinstalled and verified to
+preserve both `PrepareNoteVal` and `RunNoteVal` and their button actions. Its
+pre-install backup is
+`references\backups\Draft Input spreadsheet for SST_20261112_110652_298117.xlsm`.
+The new launcher was tested in Excel against a temporary cache; a live NoteVal
+run remains separate from installation and deployment.
+
+Close and reopen Excel before relying on the new controller if an Excel
+session has already cached an older release. To roll back the controller
+while keeping P3/P4 and the short component paths, restore
+`20261112-short-paths-v1` to the central `current.txt`. The prior pointer is
+also preserved as `current.txt.backup-20261112-before-short-paths-v2`. The
+older whole-bundle release `20261109-cache-v25` is an emergency rollback only;
+it does not include P3/P4.
+
+Release `20261109-cache-v25` was active earlier on 11 November 2026 (built
+from `f9071b9`). Property Stage 2 loads the JRC add-in in its own Excel, stops
+before the macro if `P. Curves` is not numeric, and rejects a run whose
+`O. PVOutput` has no non-zero PVs for any scenario. Its self-tests passed, and
+its executable hashes matched `release.json`.
 
 Live LTM acceptance remains outstanding; scenario-progress reads and abort
 behaviour have not yet been verified in a live Excel run. Once any active
@@ -496,6 +518,14 @@ python -u -m bonds_lite_input --caller "<Excel Workbook.FullName>" --caller-loca
 
 Use the Python 3.13 controller interpreter for `python`. Set `--caller` to the exact `Workbook.FullName` reported by Excel; for a OneDrive-synced Draft this can be a SharePoint URL. Set `--caller-local` to the Draft's local synced filesystem path. The window handle is the `Application.Hwnd` of the Excel instance containing the Draft.
 
+To skip looking these up, `tools\run_stage_from_source.py` finds the open Draft and runs any stage (`1`-`4`, `P1`, `P2`) from the working-tree `src` folder, so code changes can be tested without building or promoting a release:
+
+```powershell
+& $env:BONDS_LITE_PYTHON tools\run_stage_from_source.py P1
+```
+
+Source runs write the same Draft audit panels and `SST Output_<suffix>` folders as button runs.
+
 ### Maintainers: package Stage 4
 
 Existing releases include `MACalc\MACalcModel.exe` alongside the `Controller`
@@ -533,7 +563,7 @@ when it reuses a component. `release.json` lists the fingerprints under
 `reused_components`. All three self-tests and the source checks still run on
 every build. Pass `--rebuild-all` (or `--clean`) to force a full rebuild.
 
-Release `20261110-shared-v26` is the first shared-component release. It was
+Release `20261110-shared-v26` was active before 11 November 2026. It was
 published and promoted on 10 November 2026 after all three frozen self-tests
 passed. Its Model and MACalc applications are stored once under
 `components\BondsLiteModel\<fingerprint>` and
@@ -550,6 +580,18 @@ components (about 600 MB); later controller-only releases download about
 If a component copy to the share is interrupted, the build stops before
 `current.txt` changes, but a hidden `.<fingerprint>.partial-*` folder can be
 left under `components\<name>`. Delete it before retrying the build.
+
+From layout version 3 (Decision 132), each component folder is named with the
+first 12 characters of its fingerprint, for example
+`components\BondsLiteModel\bfe600e2737b`. Excel's file copy cannot handle paths
+of 260 characters or more, and the 64-character folders used by
+`20261110-shared-v26` to `20261111-property-p4-v1` pushed three bundled DLL
+paths to 262–292 characters. Excel could not download those releases and fell
+back to `20261109-cache-v25`. The Python loader and updated launcher also
+recognise the older full-fingerprint folder names in existing local caches;
+this does not make the overlong central paths safe to copy. The builder now
+refuses to publish a component with any path of 260 characters or more.
+Drafts need the updated launcher VBA to read layout version 3 folders.
 
 The builder publishes with `robocopy /MT:16` and then checks that every staged
 file exists in the release with the same size. If the copy fails or is
@@ -708,9 +750,67 @@ runtime ignores this override.
 
 The LTM macro normally clears `O. NoteVal` and the `O. NoteValRebase` table.
 Stage 2 does not snapshot, restore, validate or populate these areas. The
-`P2` token is available to the source controller and, from release
-`20261107-cache-v17`, to the packaged controller. A real LTM run and live Draft
-installation of the Stage 2 button require separate user approval.
+`P2` token is available to the source and packaged controllers in the current
+release.
+
+## Property Stage 3 - Prepare NoteVal
+
+Property Stage 3 requires the Property flag to be TRUE and a successful Stage
+2 audit. It copies the selected NoteVal template to
+`SST Output_<suffix>\Property`, points its Flash links at the exact workbook in
+the Stage 2 audit, recalculates the NoteVal I10 spill, and verifies that the
+spill matches the Flash source. It scans only `I. Inputs` and `I. Control` for
+Flash formulas. The Stage 3 audit records the template-derived output and the
+Flash input used.
+
+Close the Draft in Excel and install the Stage 3 audit panel and button:
+
+```powershell
+python -m bonds_lite_input --install-property-stage-three "Draft Input spreadsheet for SST.xlsm"
+```
+
+The installer creates a timestamped backup under `references\backups`.
+The **Prepare NoteVal** button launches `P3`; the Draft must have the Property
+Stage 1 and Stage 2 panels installed. From the project folder, maintainers can
+run the source version with:
+
+```powershell
+& $env:BONDS_LITE_PYTHON tools\run_stage_from_source.py P3
+```
+
+## Property Stage 4 - Run NoteVal
+
+Property Stage 4 runs `modControl.Run` on the exact workbook recorded as the
+successful Stage 3 output. Stage 2 must still refer to the same Flash workbook,
+and its last successful run must be no later than the Stage 3 finish. Stage 4
+does not refresh external links; it uses the cached values prepared by Stage
+3.
+
+Close the Draft in Excel and install the Stage 4 audit panel and button:
+
+```powershell
+python -m bonds_lite_input --install-property-stage-four "Draft Input spreadsheet for SST.xlsm"
+```
+
+The installer creates a timestamped backup and requires the Stage 3 controls.
+The **Run NoteVal** button starts `P4`. Stage 4 makes a temporary pre-run
+backup, runs NoteVal in a separate visible Excel instance, and saves only
+after verifying fresh start/end timestamps and numeric solver targets. It
+logs the solver residuals for review; no residual tolerance is applied. If
+the run fails, Stage 4 restores and verifies the pre-run workbook. The
+watchdog prompts to wait or abort after 30 minutes; abort closes only the
+Excel instance Stage 4 owns.
+
+Maintainers can run P4 from source while the Draft is open in desktop Excel:
+
+```powershell
+& $env:BONDS_LITE_PYTHON tools\run_stage_from_source.py P4
+```
+
+The `SST_P4_TIME_LIMIT_MINUTES` override is available only in source mode.
+Current packaged releases accept the `P3` and `P4` tokens; users on an older
+release should close and reopen Excel after the release pointer is promoted
+so the Draft launcher refreshes its local cache.
 
 ## Glossary
 

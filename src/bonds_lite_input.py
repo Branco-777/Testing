@@ -36,6 +36,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger("bonds_lite_input")
 
 MODEL_QUIET_HEARTBEAT_SECONDS = 30.0
+# Must match tools.build_packaged_stages.COMPONENT_FOLDER_LENGTH and the VBA launcher.
+COMPONENT_FOLDER_LENGTH = 12
 
 
 @dataclass
@@ -192,7 +194,7 @@ def resolve_packaged_component(
     if not isinstance(manifest, dict):
         raise BondsLiteError("Packaged release manifest must be a JSON object")
     if component_map is None:
-        if manifest.get("layout_version") == 2:
+        if manifest.get("layout_version") in {2, 3}:
             raise BondsLiteError("Packaged release component map is missing")
         return bundle / legacy_directories[component_name]
 
@@ -209,9 +211,12 @@ def resolve_packaged_component(
         release_root = bundle.parents[2]
     except IndexError as error:
         raise BondsLiteError("Packaged release is outside its expected cache layout") from error
-    component_root = (
-        release_root / "components" / component_name / fingerprint
+    component_folder_name = (
+        fingerprint[:COMPONENT_FOLDER_LENGTH]
+        if manifest.get("layout_version") == 3
+        else fingerprint
     )
+    component_root = release_root / "components" / component_name / component_folder_name
     record_path = component_root / "component.json"
     marker_path = component_root / "component.id"
     try:
@@ -1199,10 +1204,17 @@ End Function
 Private Function CompleteComponent( _
     ByVal componentRoot As String, ByVal componentName As String, _
     ByVal fingerprint As String, ByVal filesystem As Object) As Boolean
+    Dim componentParent As String, componentFolder As String
     If Not IsComponentFingerprint(fingerprint) Then Exit Function
+    componentParent = filesystem.BuildPath(componentRoot, componentName)
+    componentFolder = filesystem.BuildPath(componentParent, Left$(fingerprint, 12))
+    If CompleteComponentFolder( _
+            componentFolder, componentName, fingerprint, filesystem) Then
+        CompleteComponent = True
+        Exit Function
+    End If
     CompleteComponent = CompleteComponentFolder( _
-        filesystem.BuildPath( _
-            filesystem.BuildPath(componentRoot, componentName), fingerprint), _
+        filesystem.BuildPath(componentParent, fingerprint), _
         componentName, fingerprint, filesystem)
 End Function
 
@@ -1257,16 +1269,25 @@ Private Sub EnsureLocalComponent( _
     ByVal filesystem As Object)
     On Error GoTo CopyFailed
     Dim source As String, parent As String, destination As String
+    Dim componentFolderName As String
     Dim staging As String, operation As String
     Dim errorNumber As Long, errorMessage As String
     operation = "validate the central component"
-    source = filesystem.BuildPath( _
-        filesystem.BuildPath(centralComponentRoot, componentName), fingerprint)
     If Not CompleteComponent(centralComponentRoot, componentName, fingerprint, filesystem) Then
         Err.Raise vbObjectError + 420, , "The central " & componentName & " component is incomplete"
     End If
+    componentFolderName = Left$(fingerprint, 12)
+    If Not CompleteComponentFolder( _
+            filesystem.BuildPath( _
+                filesystem.BuildPath(centralComponentRoot, componentName), _
+                componentFolderName), _
+            componentName, fingerprint, filesystem) Then
+        componentFolderName = fingerprint
+    End If
+    source = filesystem.BuildPath( _
+        filesystem.BuildPath(centralComponentRoot, componentName), componentFolderName)
     parent = filesystem.BuildPath(localComponentRoot, componentName)
-    destination = filesystem.BuildPath(parent, fingerprint)
+    destination = filesystem.BuildPath(parent, componentFolderName)
     If filesystem.FolderExists(destination) Then
         operation = "validate the cached component"
         If Not CompleteComponent(localComponentRoot, componentName, fingerprint, filesystem) Then
@@ -1284,6 +1305,9 @@ Private Sub EnsureLocalComponent( _
         Format$(Now, "yyyymmddhhnnss") & "-" & _
         CStr(CLng(Timer * 1000)))
     operation = "copy the component to " & staging
+    Application.StatusBar = _
+        "Copying Bonds Lite model components to local runtime. This may take several minutes..."
+    DoEvents
     filesystem.CopyFolder source, staging, False
     operation = "verify the staged component at " & staging
     If Not CompleteComponentFolder( _
@@ -1311,6 +1335,15 @@ CopyFailed:
     On Error GoTo 0
     Err.Raise errorNumber, , _
         "Unable to stage " & componentName & " from " & source & ": " & errorMessage
+End Sub
+
+Private Sub ShowCachedReleaseWarning( _
+    ByVal localReleaseId As String, ByVal errorMessage As String)
+    Dim warningMessage As String
+    warningMessage = "Bonds Lite update unavailable; using cached release " & _
+        localReleaseId & vbCrLf & vbCrLf & "Reason: " & errorMessage
+    Application.StatusBar = "Bonds Lite update unavailable; using cached release " & localReleaseId
+    MsgBox warningMessage, vbExclamation, "Bonds Lite"
 End Sub
 
 Private Function CurrentLocalBundle() As String
@@ -1380,7 +1413,8 @@ Private Function ResolveLocalBundle() As String
     centralComponentRoot = filesystem.BuildPath(PACKAGED_RELEASE_ROOT, "components")
     If Not CompleteBundle(sourceBundle, filesystem, centralComponentRoot) Then
         If Len(localCacheBundle) > 0 Then
-            Application.StatusBar = "Bonds Lite update unavailable; using cached release " & localReleaseId
+            errorMessage = "The selected central Bonds Lite release is incomplete"
+            ShowCachedReleaseWarning localReleaseId, errorMessage
             mCurrentLocalBundle = localCacheBundle
             ResolveLocalBundle = localCacheBundle
             Exit Function
@@ -1468,7 +1502,7 @@ ReleaseUnavailable:
     End If
     On Error GoTo 0
     If Len(localCacheBundle) > 0 Then
-        Application.StatusBar = "Bonds Lite update unavailable; using cached release " & localReleaseId
+        ShowCachedReleaseWarning localReleaseId, errorMessage
         ResolveLocalBundle = localCacheBundle
         mCurrentLocalBundle = localCacheBundle
         Exit Function
@@ -1487,7 +1521,7 @@ CopyFailed:
         If filesystem.FileExists(pointerTemporary) Then filesystem.DeleteFile pointerTemporary, True
     End If
     If Len(localCacheBundle) > 0 Then
-        Application.StatusBar = "Bonds Lite update unavailable; using cached release " & localReleaseId
+        ShowCachedReleaseWarning localReleaseId, errorMessage
         ResolveLocalBundle = localCacheBundle
         mCurrentLocalBundle = localCacheBundle
         Exit Function
@@ -2643,6 +2677,44 @@ def read_output_suffix(caller: xw.Book) -> str:
     )
 
 
+def read_entity(caller: xw.Book) -> str:
+    """Read the trimmed, Windows-safe entity name from the Draft."""
+    try:
+        value = _control_cell(caller, "SST_Entity", "Entity name").value
+    except BondsLiteError as error:
+        raise BondsLiteError(
+            "SST_Entity is missing or invalid; run "
+            "--install-property-stage-three to install the entity name"
+        ) from error
+    if not isinstance(value, str) or not value.strip():
+        raise BondsLiteError("SST_Entity must contain non-blank text")
+    entity = value.strip()
+    try:
+        validate_output_suffix(entity)
+    except BondsLiteError as error:
+        raise BondsLiteError(
+            "SST_Entity must be Windows-safe filename text without invalid "
+            "characters or a trailing dot or space"
+        ) from error
+    return entity
+
+
+def entity_output_name(entity: str, template_path: Path, suffix: str) -> str:
+    """Build an entity-prefixed output filename without duplicating its prefix."""
+    try:
+        safe_entity = validate_output_suffix(entity)
+        safe_suffix = validate_output_suffix(suffix)
+    except BondsLiteError as error:
+        raise BondsLiteError(f"Cannot build an entity output filename: {error}") from error
+    template_stem = Path(template_path).stem
+    prefix = (
+        ""
+        if template_stem.casefold().startswith(f"{safe_entity}_".casefold())
+        else f"{safe_entity}_"
+    )
+    return f"{prefix}{template_stem}_{safe_suffix}{Path(template_path).suffix}"
+
+
 def initialise_stage_path_names(caller: xw.Book) -> None:
     """Name the original labelled controls once, then preserve moved names."""
     existing = {
@@ -3218,16 +3290,42 @@ def install_button(caller: Path, packaged: bool = False) -> Path:
             initialise_stage_path_names(book)
             components = book.api.VBProject.VBComponents
             names = [components.Item(index).Name for index in range(1, components.Count + 1)]
+            preserved_property_macros: list[str] = []
             if "modBondsLiteLauncher" in names:
                 module = components.Item("modBondsLiteLauncher")
-                if module.CodeModule.CountOfLines:
-                    module.CodeModule.DeleteLines(1, module.CodeModule.CountOfLines)
+                code_module = module.CodeModule
+                existing_source = (
+                    code_module.Lines(1, code_module.CountOfLines)
+                    if code_module.CountOfLines
+                    else ""
+                ).replace("\r\n", "\n")
+                existing_source_folded = existing_source.casefold()
+                property_macros = (
+                    (
+                        "Public Sub PrepareNoteVal()",
+                        'Public Sub PrepareNoteVal()\n    LaunchBondsLite "P3"\nEnd Sub',
+                    ),
+                    (
+                        "Public Sub RunNoteVal()",
+                        'Public Sub RunNoteVal()\n    LaunchBondsLite "P4"\nEnd Sub',
+                    ),
+                )
+                for declaration, macro_source in property_macros:
+                    if declaration.casefold() in existing_source_folded:
+                        if macro_source.casefold() not in existing_source_folded:
+                            raise BondsLiteError(
+                                f"Cannot preserve {declaration} with an unsupported implementation"
+                            )
+                        preserved_property_macros.append(macro_source)
+                if code_module.CountOfLines:
+                    code_module.DeleteLines(1, code_module.CountOfLines)
             else:
                 module = components.Add(1)
                 module.Name = "modBondsLiteLauncher"
-            module.CodeModule.AddFromString(
-                PACKAGED_VBA_LAUNCHER if packaged else VBA_LAUNCHER
-            )
+            launcher_source = PACKAGED_VBA_LAUNCHER if packaged else VBA_LAUNCHER
+            if preserved_property_macros:
+                launcher_source += "\n" + "\n".join(preserved_property_macros) + "\n"
+            module.CodeModule.AddFromString(launcher_source)
             sheet = book.sheets["I. Control"]
             anchor = sheet.range("D74:F76")
             _install_stage_button(
@@ -3270,12 +3368,14 @@ def main() -> int:
     parser.add_argument("--install-stage-four", type=Path)
     parser.add_argument("--install-property-stage-one", type=Path)
     parser.add_argument("--install-property-stage-two", type=Path)
+    parser.add_argument("--install-property-stage-three", type=Path)
+    parser.add_argument("--install-property-stage-four", type=Path)
     parser.add_argument("--caller")
     parser.add_argument("--caller-local", type=Path)
     parser.add_argument("--excel-hwnd", type=int)
     parser.add_argument("--pause", action="store_true", help="Wait for Enter after a run")
     parser.add_argument(
-        "--stage", choices=("1", "2", "3", "4", "P1", "P2"), default="1"
+        "--stage", choices=("1", "2", "3", "4", "P1", "P2", "P3", "P4"), default="1"
     )
     parser.add_argument("--self-test", action="store_true")
     arguments = parser.parse_args()
@@ -3311,6 +3411,22 @@ def main() -> int:
         )
         logger.info(f"Property Stage 2 controls installed; original backup: {backup}")
         return 0
+    if arguments.install_property_stage_three:
+        from sst_property_stage_three import install_property_stage_three_controls
+
+        backup = install_property_stage_three_controls(
+            arguments.install_property_stage_three
+        )
+        logger.info(f"Property Stage 3 controls installed; original backup: {backup}")
+        return 0
+    if arguments.install_property_stage_four:
+        from sst_property_stage_four import install_property_stage_four_controls
+
+        backup = install_property_stage_four_controls(
+            arguments.install_property_stage_four
+        )
+        logger.info(f"Property Stage 4 controls installed; original backup: {backup}")
+        return 0
     if arguments.self_test:
         import openpyxl
         import pythoncom
@@ -3326,13 +3442,17 @@ def main() -> int:
         parser.error("Specify --caller and --excel-hwnd, or --install-button")
     result = 0
     caller_path_token = None
-    heartbeat_interval = 60.0 if arguments.stage == "P2" else 5.0
+    heartbeat_interval = 60.0 if arguments.stage in ("P2", "P4") else 5.0
     with run_progress(heartbeat_interval=heartbeat_interval) as progress:
         stage_name = (
             "Property Stage 1"
             if arguments.stage == "P1"
             else "Property Stage 2"
             if arguments.stage == "P2"
+            else "Property Stage 3"
+            if arguments.stage == "P3"
+            else "Property Stage 4"
+            if arguments.stage == "P4"
             else f"Stage {arguments.stage}"
         )
         logger.info(
@@ -3395,6 +3515,18 @@ def main() -> int:
                 output = run_property_stage_two(matches[0])
                 logger.info(
                     f"Property Stage 2 succeeded; updated LTM Flash in place:\n{output}"
+                )
+            elif arguments.stage == "P3":
+                from sst_property_stage_three import run_property_stage_three
+
+                output = run_property_stage_three(matches[0])
+                logger.info(f"Property Stage 3 succeeded; saved NoteVal:\n{output}")
+            elif arguments.stage == "P4":
+                from sst_property_stage_four import run_property_stage_four
+
+                output = run_property_stage_four(matches[0])
+                logger.info(
+                    f"Property Stage 4 succeeded; ran NoteVal in place:\n{output}"
                 )
             else:
                 output = run_stage_one(matches[0])

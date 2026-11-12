@@ -27,6 +27,10 @@ MACALC_SOURCE_NAMES = (
     "MACalcutils.py",
 )
 COMPONENT_CACHE_DIR = "components"
+# Shared component folders use a fingerprint prefix; component.id keeps the full
+# fingerprint. Excel's FileSystemObject cannot copy paths of MAX_PATH or more.
+COMPONENT_FOLDER_LENGTH = 12
+WINDOWS_MAX_PATH = 260
 EXCLUDED_SOURCE_PARTS = {"__pycache__", ".git", ".venv", "venv", "build", "dist"}
 MACALC_PACKAGE_POLICY = "windows-x64-cbc-v1"
 
@@ -134,6 +138,10 @@ def pyinstaller_command(
             "sst_property_stage_one",
             "--hidden-import",
             "sst_property_stage_two",
+            "--hidden-import",
+            "sst_property_stage_three",
+            "--hidden-import",
+            "sst_property_stage_four",
             "--hidden-import",
             "sst_property_stage_two_watchdog",
         ]
@@ -355,10 +363,22 @@ def publish_component(
     executable = application / f"{name}.exe"
     if not executable.is_file():
         raise RuntimeError(f"Packaged component executable is missing: {executable}")
-    executable_hash = sha256_file(executable)
     component_parent = release_root / "components" / name
+    component = component_parent / fingerprint[:COMPONENT_FOLDER_LENGTH]
+    longest = max(
+        (
+            str(component / "app" / path.relative_to(application))
+            for path in application.rglob("*")
+        ),
+        key=len,
+    )
+    if len(longest) >= WINDOWS_MAX_PATH:
+        raise RuntimeError(
+            f"Shared component path has {len(longest)} characters; Excel cannot "
+            f"copy paths of {WINDOWS_MAX_PATH} or more: {longest}"
+        )
+    executable_hash = sha256_file(executable)
     component_parent.mkdir(parents=True, exist_ok=True)
-    component = component_parent / fingerprint
     if component.exists():
         record_path = component / "component.json"
         marker_path = component / "component.id"
@@ -621,7 +641,7 @@ def main() -> int:
         manifest = {
             "release_id": options.release_id,
             "built_utc": datetime.now(timezone.utc).isoformat(),
-            "layout_version": 2,
+            "layout_version": 3,
             "model_source_sha256": hashes,
             "macalc_source_sha256": macalc_hashes,
             "component_fingerprints": expected_fingerprints,

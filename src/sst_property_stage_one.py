@@ -23,6 +23,17 @@ discard_replaced_stress_folder = shared.discard_replaced_stress_folder
 remove_incomplete_stress_folder = shared.remove_incomplete_stress_folder
 
 PROPERTY_FLAG = "SST_Property_standalone"
+INTEREST_FLAG = "SST_Interest_standalone"
+BASE_BLOCK = "Base"
+STRESS_BLOCKS = {
+    (True, False): "Interest",
+    (False, True): "Property",
+    (True, True): "Interest_Property",
+}
+SCEN_DESC_COLUMN = 10
+SCEN_DESC_HEADER = "scen desc"
+INTEREST_STRESS_COLUMNS = (11, 12, 13)
+PROPERTY_STRESS_COLUMNS = (17, 18)
 TEMPLATE_NAME = "SST_LTMFlash_input_template"
 SCENFLIPPER_SHEET = "I. ScenFlipper"
 PROPERTY_PANEL_NAME = "SST_PropStage1_Panel"
@@ -69,17 +80,22 @@ class PropertyStageOneError(shared.BondsLiteError):
 
 @dataclass(frozen=True)
 class PropertyStageOneInputs:
-    """Validated Draft controls and the source ScenFlipper contents."""
+    """Validated Draft controls and the selected ScenFlipper values.
+
+    ``values`` holds rows 1-5 of the Draft ScenFlipper followed by the Base
+    block and the stress block selected by the Interest and Property flags.
+    """
 
     caller_path: Path
+    entity: str
     template_path: Path
     valuation_date: datetime
     output_suffix: str
     values: list[list[object]]
-    formulas: list[list[object]]
     rows: int
     columns: int
     headers: tuple[object, ...]
+    stress_block: str
 
 
 @dataclass(frozen=True)
@@ -93,14 +109,29 @@ class TemplateSnapshot:
     dependent_formulas: tuple[tuple[str, str, str], ...]
 
 
-def read_property_flag(caller: Any) -> bool:
-    """Read the Property workstream flag as an actual Excel Boolean."""
-    value = shared._control_cell(caller, PROPERTY_FLAG, "Property flag name").value
+def _read_flag(caller: Any, name: str, kind: str) -> bool:
+    """Read a named I. Control flag as an actual Excel Boolean."""
+    value = shared._control_cell(caller, name, f"{kind} flag name").value
     if not isinstance(value, bool):
         raise PropertyStageOneError(
-            f"Property flag {PROPERTY_FLAG} must be TRUE or FALSE, not {value!r}"
+            f"{kind} flag {name} must be TRUE or FALSE, not {value!r}"
         )
     return value
+
+
+def read_property_flag(caller: Any) -> bool:
+    """Read the Property standalone flag as an actual Excel Boolean."""
+    return _read_flag(caller, PROPERTY_FLAG, "Property")
+
+
+def read_interest_flag(caller: Any) -> bool:
+    """Read the Interest standalone flag as an actual Excel Boolean."""
+    return _read_flag(caller, INTEREST_FLAG, "Interest")
+
+
+def read_stress_flags(caller: Any) -> tuple[bool, bool]:
+    """Return the ``(interest, property)`` standalone flags."""
+    return read_interest_flag(caller), read_property_flag(caller)
 
 
 def require_property_selected(flag: bool) -> None:
@@ -109,6 +140,23 @@ def require_property_selected(flag: bool) -> None:
         raise PropertyStageOneError(
             f"Property stress is not selected: set {PROPERTY_FLAG} to TRUE"
         )
+
+
+def require_stress_selected(interest: bool, property_: bool) -> str:
+    """Return the ScenFlipper stress block selected by the flags.
+
+    Any non-empty flag combination is supported so that workstreams other
+    than Property (e.g. a future Interest-only run) can reuse the selection.
+
+    Raises:
+        PropertyStageOneError: If neither flag is TRUE.
+    """
+    if interest is not True and property_ is not True:
+        raise PropertyStageOneError(
+            "No ScenFlipper stress is selected: set "
+            f"{INTEREST_FLAG} and/or {PROPERTY_FLAG} to TRUE"
+        )
+    return STRESS_BLOCKS[(interest is True, property_ is True)]
 
 
 def _named_value(caller: Any, name: str, kind: str) -> object:
@@ -182,30 +230,100 @@ def _whole_number(value: object) -> bool:
     )
 
 
+def _scenario_blocks(
+    padded_values: list[list[object]],
+) -> dict[str, list[int]]:
+    """Group contiguous scenario rows by their ``scen desc`` label.
+
+    Returns:
+        Zero-based row indices for each block label, in sheet order.
+    """
+    blocks: dict[str, list[int]] = {}
+    previous: str | None = None
+    for row_index in range(5, len(padded_values)):
+        scenario = padded_values[row_index][0]
+        if scenario is None or scenario == "":
+            break
+        label = padded_values[row_index][SCEN_DESC_COLUMN - 1]
+        label = label.strip() if isinstance(label, str) else ""
+        valid = {BASE_BLOCK, *STRESS_BLOCKS.values()}
+        if label not in valid:
+            raise PropertyStageOneError(
+                f"Draft I. ScenFlipper row {row_index + 1} scen desc must be one of "
+                f"{', '.join(sorted(valid))}, not {label!r}"
+            )
+        if label != previous and label in blocks:
+            raise PropertyStageOneError(
+                f"Draft I. ScenFlipper {label} block rows must be contiguous"
+            )
+        blocks.setdefault(label, []).append(row_index)
+        previous = label
+    return blocks
+
+
+def _require_stressed_rows(
+    padded_values: list[list[object]],
+    rows: list[int],
+    columns: tuple[int, ...],
+    kind: str,
+) -> None:
+    """Require every selected row to have a non-zero value in ``columns``."""
+    letters = ", ".join(chr(64 + column) for column in columns)
+    for row_index in rows:
+        cells = [padded_values[row_index][column - 1] for column in columns]
+        for column, value in zip(columns, cells, strict=True):
+            if value is not None and (
+                not isinstance(value, Real) or isinstance(value, bool)
+            ):
+                raise PropertyStageOneError(
+                    f"Draft I. ScenFlipper {kind} stress at row {row_index + 1}, "
+                    f"column {chr(64 + column)} must be numeric, not {value!r}"
+                )
+        if all(value is None or value == 0 for value in cells):
+            raise PropertyStageOneError(
+                f"{kind} stress is selected but Draft I. ScenFlipper row "
+                f"{row_index + 1} has no non-zero value in columns {letters}"
+            )
+
+
+def _require_unstressed_rows(
+    padded_values: list[list[object]],
+    rows: list[int],
+    columns: tuple[int, ...],
+    block: str,
+) -> None:
+    """Require every row in ``rows`` to be blank or zero in ``columns``."""
+    for row_index in rows:
+        for column in columns:
+            value = padded_values[row_index][column - 1]
+            if value is not None and value != 0:
+                raise PropertyStageOneError(
+                    f"Draft I. ScenFlipper {block} block must not be stressed in "
+                    f"column {chr(64 + column)}: row {row_index + 1} is {value!r}"
+                )
+
+
 def validate_scenflipper(
-    values: list[list[object]], formulas: list[list[object]]
-) -> tuple[tuple[object, ...], int]:
-    """Validate a Draft ScenFlipper grid and return its headers and dimensions."""
+    values: list[list[object]], interest: bool, property_: bool
+) -> tuple[tuple[object, ...], int, list[list[object]], str]:
+    """Validate a Draft ScenFlipper grid and select the blocks to copy.
+
+    Args:
+        values: Draft ScenFlipper values from A1. Rows 1-3 hold the controls,
+            row 5 the headers and rows 6 onwards contiguous scenario blocks
+            labelled in column J (``scen desc``).
+        interest: ``SST_Interest_standalone`` flag.
+        property_: ``SST_Property_standalone`` flag.
+
+    Returns:
+        Row 5 headers, grid width, the output grid (rows 1-5, the Base block
+        and the selected stress block) and the selected stress block label.
+    """
+    stress_block = require_stress_selected(interest, property_)
     if not values or len(values) < 5 or not values[0]:
         raise PropertyStageOneError("Draft I. ScenFlipper used range is empty")
     width = max(len(row) for row in values)
     padded_values = [row + [None] * (width - len(row)) for row in values]
-    padded_formulas = [row + [None] * (width - len(row)) for row in formulas]
-    for row_index, row in enumerate(padded_values, start=1):
-        for column_index, value in enumerate(row, start=1):
-            if _is_excel_error(value):
-                raise PropertyStageOneError(
-                    "Draft I. ScenFlipper contains an Excel error at "
-                    f"row {row_index}, column {column_index}: {value}"
-                )
-    for row_index, row in enumerate(padded_formulas, start=1):
-        for column_index, formula in enumerate(row, start=1):
-            if isinstance(formula, str) and formula.startswith("="):
-                if "!" in formula or "[" in formula:
-                    raise PropertyStageOneError(
-                        "Draft I. ScenFlipper formula refers to another sheet or "
-                        f"workbook at row {row_index}, column {column_index}"
-                    )
 
     headers = tuple(padded_values[4])
     if any(not isinstance(header, str) or not header.strip() for header in headers):
@@ -233,7 +351,6 @@ def validate_scenflipper(
             "Draft I. ScenFlipper B3 must be a whole number from 1 to B2"
         )
 
-    scenario_rows = 0
     blank_seen = False
     for row_index in range(5, len(padded_values)):
         scenario = padded_values[row_index][0]
@@ -243,14 +360,70 @@ def validate_scenflipper(
             raise PropertyStageOneError(
                 "Draft I. ScenFlipper scenarios in column A must be contiguous"
             )
-        else:
-            scenario_rows += 1
-    if scenario_rows != scenario_count:
+    if width < max(PROPERTY_STRESS_COLUMNS) or not (
+        str(headers[SCEN_DESC_COLUMN - 1]).strip().casefold() == SCEN_DESC_HEADER
+    ):
         raise PropertyStageOneError(
-            "Draft I. ScenFlipper B2 must equal the number of scenario rows "
-            f"(B2={scenario_count}, rows={scenario_rows})"
+            f"Draft I. ScenFlipper column J header must be {SCEN_DESC_HEADER!r}"
         )
-    return headers, width
+    blocks = _scenario_blocks(padded_values)
+    if next(iter(blocks), None) != BASE_BLOCK:
+        raise PropertyStageOneError(
+            f"Draft I. ScenFlipper first scenario block must be {BASE_BLOCK}"
+        )
+    if stress_block not in blocks:
+        raise PropertyStageOneError(
+            f"Draft I. ScenFlipper has no {stress_block} block in column J"
+        )
+    base_rows = blocks[BASE_BLOCK]
+    stress_rows = blocks[stress_block]
+    if len(base_rows) != len(stress_rows):
+        raise PropertyStageOneError(
+            f"Draft I. ScenFlipper {BASE_BLOCK} and {stress_block} blocks must "
+            f"have the same number of rows ({len(base_rows)} and {len(stress_rows)})"
+        )
+    all_stress_columns = INTEREST_STRESS_COLUMNS + PROPERTY_STRESS_COLUMNS
+    _require_unstressed_rows(padded_values, base_rows, all_stress_columns, BASE_BLOCK)
+    if interest:
+        _require_stressed_rows(
+            padded_values, stress_rows, INTEREST_STRESS_COLUMNS, "Interest"
+        )
+    else:
+        _require_unstressed_rows(
+            padded_values, stress_rows, INTEREST_STRESS_COLUMNS, stress_block
+        )
+    if property_:
+        _require_stressed_rows(
+            padded_values, stress_rows, PROPERTY_STRESS_COLUMNS, "Property"
+        )
+    else:
+        _require_unstressed_rows(
+            padded_values, stress_rows, PROPERTY_STRESS_COLUMNS, stress_block
+        )
+
+    selected = [padded_values[index] for index in range(5)] + [
+        padded_values[index] for index in base_rows + stress_rows
+    ]
+    for row_index, row in enumerate(selected, start=1):
+        for column_index, value in enumerate(row, start=1):
+            if _is_excel_error(value):
+                raise PropertyStageOneError(
+                    "Draft I. ScenFlipper selected rows contain an Excel error at "
+                    f"output row {row_index}, column {column_index}: {value}"
+                )
+    selected_count = len(base_rows) + len(stress_rows)
+    if scenario_count != selected_count:
+        raise PropertyStageOneError(
+            "Draft I. ScenFlipper B2 must equal the number of Base and "
+            f"{stress_block} rows (B2={scenario_count}, rows={selected_count})"
+        )
+    numbers = [row[0] for row in selected[5:]]
+    if numbers != list(range(1, selected_count + 1)):
+        raise PropertyStageOneError(
+            f"Draft I. ScenFlipper column A of the {BASE_BLOCK} and {stress_block} "
+            f"blocks must number 1 to {selected_count} in order"
+        )
+    return headers, width, selected, stress_block
 
 
 def _date_value(value: object) -> datetime:
@@ -263,9 +436,13 @@ def _date_value(value: object) -> datetime:
 
 
 def read_property_stage_one_inputs(caller: Any) -> PropertyStageOneInputs:
-    """Read the Property flag, template, valuation date and scenario grid."""
+    """Read the stress flags, template, valuation date and scenario grid."""
     caller_path = shared.resolve_caller_path(caller)
-    require_property_selected(read_property_flag(caller))
+    interest, property_ = read_stress_flags(caller)
+    # The Property workstream only runs Property stresses; Interest-only
+    # selection is kept in validate_scenflipper for the Interest workstream.
+    require_property_selected(property_)
+    entity = shared.read_entity(caller)
     template_path = _resolve_template_path(
         _named_value(caller, TEMPLATE_NAME, "LTM Flash template name"),
         caller_path,
@@ -294,20 +471,26 @@ def read_property_stage_one_inputs(caller: Any) -> PropertyStageOneInputs:
         raise PropertyStageOneError(
             f"Draft is missing the {SCENFLIPPER_SHEET} sheet"
         ) from error
-    values, formulas, top, left = _read_scenflipper(sheet)
+    # Values are pasted rather than formulas, so refresh any manual-mode results.
+    caller.app.api.Calculate()
+    values, _, top, left = _read_scenflipper(sheet)
     if (top, left) != (1, 1):
         raise PropertyStageOneError("Draft I. ScenFlipper used range must start at A1")
-    headers, columns = validate_scenflipper(values, formulas)
+    headers, columns, selected, stress_block = validate_scenflipper(
+        values, interest, property_
+    )
+    logger.info("Property Stage 1 copies Base and %s blocks", stress_block)
     return PropertyStageOneInputs(
         caller_path,
+        entity,
         template_path,
         valuation_date,
         output_suffix,
-        values,
-        formulas,
-        len(values),
+        selected,
+        len(selected),
         columns,
         headers,
+        stress_block,
     )
 
 
@@ -624,7 +807,6 @@ def verify_ltm_flash(
     actual_values = _padded_grid(_grid_values(sheet, rows, columns), rows, columns)
     expected_values = _padded_grid(expected.values, rows, columns)
     actual_formulas = _padded_grid(_grid_formulas(sheet, rows, columns), rows, columns)
-    expected_formulas = _padded_grid(expected.formulas, rows, columns)
     difference = _first_grid_difference(actual_values, expected_values)
     if difference is not None:
         row, column, actual, expected_value = difference
@@ -633,14 +815,13 @@ def verify_ltm_flash(
             f"row {row}, column {column}: expected {expected_value!r}, "
             f"received {actual!r}"
         )
-    difference = _first_grid_difference(actual_formulas, expected_formulas)
-    if difference is not None:
-        row, column, actual, expected_formula = difference
-        raise PropertyStageOneError(
-            "LTM Flash I. ScenFlipper formula mismatch at "
-            f"row {row}, column {column}: expected {expected_formula!r}, "
-            f"received {actual!r}"
-        )
+    for row, formula_row in enumerate(actual_formulas, start=1):
+        for column, formula in enumerate(formula_row, start=1):
+            if isinstance(formula, str) and formula.startswith("="):
+                raise PropertyStageOneError(
+                    "LTM Flash I. ScenFlipper must contain values only; formula at "
+                    f"row {row}, column {column}: {formula!r}"
+                )
     if _prm_names(book) != template.prm_names:
         raise PropertyStageOneError("LTM Flash prm_* names changed during preparation")
     if _scenflipper_formulas(book) != template.dependent_formulas:
@@ -686,22 +867,22 @@ def verify_ltm_flash(
 
 
 def replace_scenflipper(
-    source_sheet: Any,
     target_sheet: Any,
-    source_rows: int,
-    source_columns: int,
+    values: list[list[object]],
+    columns: int,
     target_rows: int,
     target_columns: int,
 ) -> None:
-    """Overwrite the template sheet in place, preserving sheet identity."""
-    rows = max(source_rows, target_rows)
-    columns = max(source_columns, target_columns)
-    target_sheet.range((1, 1), (rows, columns)).api.Clear()
-    source_sheet.api.UsedRange.Copy(Destination=target_sheet.range("A1").api)
-    for column in range(1, source_columns + 1):
-        target_sheet.range((1, column)).column_width = source_sheet.range(
-            (1, column)
-        ).column_width
+    """Overwrite the template sheet contents in place with selected values.
+
+    Values only are written, keeping the template's formatting and avoiding
+    names or external links to the Draft being carried across by formulas.
+    """
+    rows = max(len(values), target_rows)
+    width = max(columns, target_columns)
+    target_sheet.range((1, 1), (rows, width)).api.ClearContents()
+    grid = _padded_grid(values, len(values), columns)
+    target_sheet.range((1, 1), (len(values), columns)).value = grid
 
 
 @contextmanager
@@ -811,9 +992,8 @@ def run_property_stage_one(caller: Any) -> Path | None:
                 inputs.output_suffix,
                 shared.PROPERTY_OUTPUT_FOLDER,
             )
-            template_name = (
-                f"{inputs.template_path.stem}_{inputs.output_suffix}"
-                f"{inputs.template_path.suffix}"
+            template_name = shared.entity_output_name(
+                inputs.entity, inputs.template_path, inputs.output_suffix
             )
             output_path = _property_output_path(
                 caller_path, output_folder, template_name
@@ -838,12 +1018,10 @@ def run_property_stage_one(caller: Any) -> Path | None:
                     application, working_path, read_only=False
                 ) as book:
                     template = _snapshot_template(book, inputs.headers)
-                    source_sheet = caller.sheets[SCENFLIPPER_SHEET]
                     target_sheet = book.sheets[SCENFLIPPER_SHEET]
                     replace_scenflipper(
-                        source_sheet,
                         target_sheet,
-                        inputs.rows,
+                        inputs.values,
                         inputs.columns,
                         template.rows,
                         template.columns,
@@ -940,6 +1118,21 @@ def _flag_control(book: Any) -> None:
             "I. Control!C18 must be labelled Property Value; no controls were installed"
         )
     book.names.add(PROPERTY_FLAG, "='I. Control'!$D$18")
+
+
+def _entity_control(book: Any) -> None:
+    """Ensure SST_Entity names the entity cell on I. Control."""
+    if "SST_Entity" in _name_keys(book):
+        try:
+            cell = shared._control_cell(book, "SST_Entity", "Entity name")
+        except shared.BondsLiteError as error:
+            raise PropertyStageOneError(str(error)) from error
+        if cell.row != 9 or cell.column != 4:
+            raise PropertyStageOneError(
+                "SST_Entity must refer to I. Control!$D$9; no controls were installed"
+            )
+        return
+    book.names.add("SST_Entity", "='I. Control'!$D$9")
 
 
 def _overlaps(
@@ -1214,6 +1407,7 @@ def install_property_stage_one_controls(caller: Path) -> Path:
             if book.api.ReadOnly:
                 raise PropertyStageOneError("Draft workbook is read-only or locked")
             _flag_control(book)
+            _entity_control(book)
             _install_property_panel(book)
             _install_property_button(book)
             _install_property_macro(book)

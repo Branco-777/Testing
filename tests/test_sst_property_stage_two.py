@@ -157,6 +157,42 @@ def test_resolve_inputs_uses_named_stage_one_handoff(
     assert inputs.workbook_path == output
 
 
+def test_resolve_inputs_accepts_entity_prefixed_stage_one_handoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage_two = _stage_two()
+    output = (
+        tmp_path / "SST Output_Test" / "Property" / "JRL_LTM_FlashModel_v3.2a_Test.xlsb"
+    )
+    output.parent.mkdir(parents=True)
+    output.write_bytes(b"workbook")
+    draft = _draft(
+        tmp_path / "Draft.xlsm",
+        "SST Output_Test/Property/JRL_LTM_FlashModel_v3.2a_Test.xlsb",
+    )
+    _patch_stage_one_handoff(monkeypatch, stage_two, draft)
+
+    inputs = stage_two.resolve_property_stage_two_inputs(draft)
+
+    assert inputs.workbook_path == output
+
+
+def test_resolve_handoff_path_uses_supplied_handoff_description(
+    tmp_path: Path,
+) -> None:
+    stage_two = _stage_two()
+
+    with pytest.raises(
+        BondsLiteError,
+        match="Property Stage 3 NoteVal output workbook does not exist",
+    ):
+        stage_two._resolve_handoff_path(
+            "missing.xlsb",
+            tmp_path / "Draft.xlsm",
+            "Property Stage 3 NoteVal output workbook",
+        )
+
+
 def test_resolve_inputs_rejects_an_unreadable_handoff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -194,6 +230,35 @@ def test_open_workbook_must_match_the_stage_one_handoff(tmp_path: Path) -> None:
         )
 
 
+def test_open_workbook_error_uses_supplied_description(tmp_path: Path) -> None:
+    stage_two = _stage_two()
+    expected = tmp_path / "prepared.xlsb"
+    actual = tmp_path / "unexpected.xlsb"
+    expected.touch()
+    actual.touch()
+
+    with pytest.raises(BondsLiteError, match="unexpected NoteVal workbook"):
+        stage_two._require_expected_workbook(
+            SimpleNamespace(api=SimpleNamespace(FullName=str(actual))),
+            expected,
+            SimpleNamespace(api=SimpleNamespace(FullName=str(tmp_path / "Draft.xlsm"))),
+            tmp_path / "Draft.xlsm",
+            "NoteVal workbook",
+        )
+
+
+def test_excel_now_error_uses_supplied_workbook_label() -> None:
+    stage_two = _stage_two()
+    application = SimpleNamespace(
+        api=SimpleNamespace(
+            Evaluate=lambda _formula: (_ for _ in ()).throw(RuntimeError("Excel"))
+        )
+    )
+
+    with pytest.raises(BondsLiteError, match="Cannot read the NoteVal Excel"):
+        stage_two._excel_now(application, "NoteVal")
+
+
 _SHAREPOINT_FOLDER = (
     "https://example.sharepoint.com/sites/Team/Shared Documents/General/Testing"
 )
@@ -221,7 +286,10 @@ def test_excel_local_path_maps_sharepoint_url_through_draft_folder(
 
     result = stage_two._excel_local_path(workbook, caller, tmp_path / "Draft.xlsm")
 
-    assert result == (tmp_path / "SST Output_Test" / "Property" / "LTM_Test.xlsb").resolve()
+    assert (
+        result
+        == (tmp_path / "SST Output_Test" / "Property" / "LTM_Test.xlsb").resolve()
+    )
 
 
 def test_require_expected_workbook_accepts_sharepoint_url_with_duplicate_name(
@@ -290,7 +358,11 @@ def test_verify_ltm_run_requires_fresh_timestamps_and_all_outputs() -> None:
         finish=datetime(2026, 11, 7, 2, 1),
         scenarios=2,
         progress=["Run 1 - End of run!", "Run 2 - End of run!", "End of multirun!"],
-        outputs={"O. CFOutput": [[1]], "O. PVOutput": _pv_grid(2), "O. ConcRisk": [[1]]},
+        outputs={
+            "O. CFOutput": [[1]],
+            "O. PVOutput": _pv_grid(2),
+            "O. ConcRisk": [[1]],
+        },
     )
 
     assert stage_two.verify_ltm_run(workbook, invoked, 2) is None
@@ -303,7 +375,11 @@ def test_verify_ltm_run_rejects_missing_scenario_marker() -> None:
         finish=datetime(2026, 11, 7, 2, 1),
         scenarios=2,
         progress=["Run 1 - End of run!", "End of multirun!"],
-        outputs={"O. CFOutput": [[1]], "O. PVOutput": _pv_grid(2), "O. ConcRisk": [[1]]},
+        outputs={
+            "O. CFOutput": [[1]],
+            "O. PVOutput": _pv_grid(2),
+            "O. ConcRisk": [[1]],
+        },
     )
 
     with pytest.raises(BondsLiteError, match="Run 2 - End of run"):
@@ -317,7 +393,11 @@ def test_verify_ltm_run_rejects_wrong_terminal_message() -> None:
         finish=datetime(2026, 11, 7, 2, 1),
         scenarios=1,
         progress=["Run 1 - End of run!", "Unexpected"],
-        outputs={"O. CFOutput": [[1]], "O. PVOutput": _pv_grid(2), "O. ConcRisk": [[1]]},
+        outputs={
+            "O. CFOutput": [[1]],
+            "O. PVOutput": _pv_grid(2),
+            "O. ConcRisk": [[1]],
+        },
     )
 
     with pytest.raises(BondsLiteError, match="End of multirun"):
@@ -331,7 +411,11 @@ def test_verify_ltm_run_rejects_stale_timestamps() -> None:
         finish=datetime(2026, 11, 7, 1, 1),
         scenarios=1,
         progress=["Run 1 - End of run!", "End of multirun!"],
-        outputs={"O. CFOutput": [[1]], "O. PVOutput": _pv_grid(2), "O. ConcRisk": [[1]]},
+        outputs={
+            "O. CFOutput": [[1]],
+            "O. PVOutput": _pv_grid(2),
+            "O. ConcRisk": [[1]],
+        },
     )
 
     with pytest.raises(BondsLiteError, match="RunStartTime is stale"):
@@ -345,7 +429,11 @@ def test_verify_ltm_run_requires_finish_at_or_after_start() -> None:
         finish=datetime(2026, 11, 7, 2),
         scenarios=1,
         progress=["Run 1 - End of run!", "End of multirun!"],
-        outputs={"O. CFOutput": [[1]], "O. PVOutput": _pv_grid(2), "O. ConcRisk": [[1]]},
+        outputs={
+            "O. CFOutput": [[1]],
+            "O. PVOutput": _pv_grid(2),
+            "O. ConcRisk": [[1]],
+        },
     )
 
     with pytest.raises(BondsLiteError, match="RunEndTime is before"):
@@ -516,6 +604,7 @@ def _run_harness(
             "tbl_Curves": _name(VALID_CURVES if curves is None else curves),
         }
     )
+
     class FakeWorkbookApi(SimpleNamespace):
         # OneDrive/SharePoint workbooks open with AutoSave on.
         _autosave = True
@@ -573,9 +662,7 @@ def _run_harness(
             )
             for sheet in workbook.sheets.values():
                 sheet.api.UsedRange.Value = [[1]]
-            workbook.sheets["O. PVOutput"].api.UsedRange.Value = _pv_grid(
-                2, pv_value
-            )
+            workbook.sheets["O. PVOutput"].api.UsedRange.Value = _pv_grid(2, pv_value)
 
         return invoke
 
